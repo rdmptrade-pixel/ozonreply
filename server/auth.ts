@@ -57,12 +57,11 @@ function saveUsers(users: User[]) {
 
 // ── PG-aware wrappers (used when DATABASE_URL is set) ─────────────────────────
 // When PG is active, (globalThis as any).__pgUsers contains async helpers.
-// All auth functions below call these wrappers to remain sync-compatible.
 
 function _pgUsers(): any { return (globalThis as any).__pgUsers; }
 
 export function getAllUsersSync(): User[] {
-  // PG version is async — callers in routes will use getAllUsers() async version
+  // PG version is async — callers in routes will use getAllUsersAsync() instead
   return loadUsers();
 }
 
@@ -102,35 +101,54 @@ export async function registerUser(
   password: string,
   name: string
 ): Promise<{ ok: true; user: UserPublic } | { ok: false; error: string }> {
-  const users = loadUsers();
   const normalizedEmail = email.toLowerCase().trim();
-
-  if (users.find((u) => u.toLowerCase?.() === normalizedEmail || u.email.toLowerCase() === normalizedEmail)) {
-    return { ok: false, error: "Пользователь с таким email уже существует" };
-  }
 
   if (password.length < 6) {
     return { ok: false, error: "Пароль должен быть не менее 6 символов" };
   }
 
+  const pg = _pgUsers();
+  if (pg) {
+    // PG path
+    const users: User[] = await pg.loadUsersPg();
+    if (users.find((u: User) => u.email.toLowerCase() === normalizedEmail)) {
+      return { ok: false, error: "Пользователь с таким email уже существует" };
+    }
+    const passwordHash = await bcrypt.hash(password, 10);
+    const isFirstUser = users.length === 0;
+    const isAdminEmail = normalizedEmail === ADMIN_EMAIL.toLowerCase();
+    const user: User = {
+      id: nextId(users),
+      email: normalizedEmail,
+      passwordHash,
+      name: name.trim(),
+      role: isAdminEmail || isFirstUser ? "admin" : "user",
+      status: isAdminEmail || isFirstUser ? "approved" : "pending",
+      createdAt: new Date().toISOString(),
+    };
+    await pg.saveUserPg(user);
+    return { ok: true, user: toPublic(user) };
+  }
+
+  // SQLite / file path
+  const users = loadUsers();
+  if (users.find((u) => u.email.toLowerCase() === normalizedEmail)) {
+    return { ok: false, error: "Пользователь с таким email уже существует" };
+  }
   const passwordHash = await bcrypt.hash(password, 10);
   const isFirstUser = users.length === 0;
   const isAdminEmail = normalizedEmail === ADMIN_EMAIL.toLowerCase();
-
   const user: User = {
     id: nextId(users),
     email: normalizedEmail,
     passwordHash,
     name: name.trim(),
     role: isAdminEmail || isFirstUser ? "admin" : "user",
-    // Admin email or first user — auto-approved; others wait
     status: isAdminEmail || isFirstUser ? "approved" : "pending",
     createdAt: new Date().toISOString(),
   };
-
   users.push(user);
   saveUsers(users);
-
   return { ok: true, user: toPublic(user) };
 }
 
@@ -140,8 +158,10 @@ export async function loginUser(
   email: string,
   password: string
 ): Promise<{ ok: true; token: string; user: UserPublic } | { ok: false; error: string }> {
-  const users = loadUsers();
   const normalizedEmail = email.toLowerCase().trim();
+
+  const pg = _pgUsers();
+  const users: User[] = pg ? await pg.loadUsersPg() : loadUsers();
   const user = users.find((u) => u.email.toLowerCase() === normalizedEmail);
 
   if (!user) return { ok: false, error: "Неверный email или пароль" };
@@ -166,6 +186,15 @@ export function getUserById(id: number): User | undefined {
   return loadUsers().find((u) => u.id === id);
 }
 
+export async function getUserByIdAsync(id: number): Promise<User | undefined> {
+  const pg = _pgUsers();
+  if (pg) {
+    const users: User[] = await pg.loadUsersPg();
+    return users.find((u: User) => u.id === id);
+  }
+  return loadUsers().find((u) => u.id === id);
+}
+
 // ── Admin: list all users ─────────────────────────────────────────────────────
 
 export function getAllUsers(): UserPublic[] {
@@ -173,6 +202,37 @@ export function getAllUsers(): UserPublic[] {
 }
 
 // ── Admin: approve / reject ───────────────────────────────────────────────────
+
+export async function updateUserStatusAsync(
+  targetId: number,
+  status: UserStatus,
+  adminEmail: string
+): Promise<{ ok: boolean; error?: string }> {
+  const pg = _pgUsers();
+  if (pg) {
+    const users: User[] = await pg.loadUsersPg();
+    const user = users.find((u: User) => u.id === targetId);
+    if (!user) return { ok: false, error: "Пользователь не найден" };
+    const update: any = { status };
+    if (status === "approved") {
+      update.approvedAt = new Date().toISOString();
+      update.approvedBy = adminEmail;
+    }
+    await pg.updateUserPg(targetId, update);
+    return { ok: true };
+  }
+  // SQLite path
+  const users = loadUsers();
+  const idx = users.findIndex((u) => u.id === targetId);
+  if (idx === -1) return { ok: false, error: "Пользователь не найден" };
+  users[idx].status = status;
+  if (status === "approved") {
+    users[idx].approvedAt = new Date().toISOString();
+    users[idx].approvedBy = adminEmail;
+  }
+  saveUsers(users);
+  return { ok: true };
+}
 
 export function updateUserStatus(
   targetId: number,
@@ -193,6 +253,20 @@ export function updateUserStatus(
 
 // ── Admin: delete user ────────────────────────────────────────────────────────
 
+export async function deleteUserAsync(targetId: number): Promise<{ ok: boolean; error?: string }> {
+  const pg = _pgUsers();
+  if (pg) {
+    await pg.deleteUserPg(targetId);
+    return { ok: true };
+  }
+  const users = loadUsers();
+  const idx = users.findIndex((u) => u.id === targetId);
+  if (idx === -1) return { ok: false, error: "Пользователь не найден" };
+  users.splice(idx, 1);
+  saveUsers(users);
+  return { ok: true };
+}
+
 export function deleteUser(targetId: number): { ok: boolean; error?: string } {
   const users = loadUsers();
   const idx = users.findIndex((u) => u.id === targetId);
@@ -208,6 +282,7 @@ export interface AuthRequest extends Request {
   user?: UserPublic;
 }
 
+// Async-aware auth middleware (works with both SQLite and PostgreSQL)
 export function requireAuth(req: AuthRequest, res: Response, next: NextFunction) {
   const authHeader = req.headers.authorization;
   const token = authHeader?.startsWith("Bearer ") ? authHeader.slice(7) : null;
@@ -223,14 +298,17 @@ export function requireAuth(req: AuthRequest, res: Response, next: NextFunction)
     return;
   }
 
-  const user = getUserById(payload.userId);
-  if (!user || user.status !== "approved") {
-    res.status(401).json({ error: "Доступ запрещён" });
-    return;
-  }
-
-  req.user = toPublic(user);
-  next();
+  // Use async user lookup to support both SQLite and PostgreSQL
+  getUserByIdAsync(payload.userId).then((user) => {
+    if (!user || user.status !== "approved") {
+      res.status(401).json({ error: "Доступ запрещён" });
+      return;
+    }
+    req.user = toPublic(user);
+    next();
+  }).catch(() => {
+    res.status(500).json({ error: "Ошибка авторизации" });
+  });
 }
 
 export function requireAdmin(req: AuthRequest, res: Response, next: NextFunction) {

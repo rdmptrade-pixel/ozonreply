@@ -1,6 +1,6 @@
 import type { Express } from "express";
 import type { Server } from "http";
-import { storage as _baseStorage, loadPublishedIds as _sqliteLoadIds, markPublishedId as _sqliteMarkId, sqlite } from "./storage";
+import { storage as _baseStorage, loadPublishedIds as _sqliteLoadIds, markPublishedId as _sqliteMarkId } from "./storage";
 import * as _storageModule from "./storage";
 
 // Unified storage proxy: reads activeStorage at call time so PG is used after initStorage()
@@ -30,9 +30,9 @@ import { generateAiResponse, type AiProvider } from "./ai";
 import {
   registerUser,
   loginUser,
-  getAllUsers,
-  updateUserStatus,
-  deleteUser,
+  getAllUsersAsync,
+  updateUserStatusAsync,
+  deleteUserAsync,
   requireAuth,
   requireAdmin,
   type AuthRequest,
@@ -88,12 +88,13 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
   // ── Admin: user management ─────────────────────────────────────────────────
 
   // List all users
-  app.get("/api/admin/users", requireAdmin, (_req, res) => {
-    res.json(getAllUsers());
+  app.get("/api/admin/users", requireAdmin, async (_req, res) => {
+    const users = await getAllUsersAsync();
+    res.json(users.map(u => { const { passwordHash, approvedBy, ...pub } = u as any; return pub; }));
   });
 
   // Approve / reject / set role
-  app.patch("/api/admin/users/:id", requireAdmin, (req, res) => {
+  app.patch("/api/admin/users/:id", requireAdmin, async (req, res) => {
     const id = parseInt(req.params.id, 10);
     const { status, role } = req.body ?? {};
     const adminUser = (req as AuthRequest).user!;
@@ -104,36 +105,39 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     }
 
     if (status) {
-      const r = updateUserStatus(id, status, adminUser.email);
+      const r = await updateUserStatusAsync(id, status, adminUser.email);
       if (!r.ok) { res.status(404).json({ error: r.error }); return; }
     }
 
     if (role && ["admin", "user"].includes(role)) {
-      // Update role directly
-      const users = getAllUsers();
-      const found = users.find(u => u.id === id);
-      if (!found) { res.status(404).json({ error: "Пользователь не найден" }); return; }
-      // Persist role change via updateUserStatus trick — load full users
-      const fs = require("fs");
-      const path = require("path");
-      const usersFile = path.join(process.cwd(), "data", "users.json");
-      const allUsers = JSON.parse(fs.readFileSync(usersFile, "utf-8"));
-      const idx = allUsers.findIndex((u: any) => u.id === id);
-      if (idx !== -1) { allUsers[idx].role = role; fs.writeFileSync(usersFile, JSON.stringify(allUsers, null, 2)); }
+      // Update role — works for both PG and file-based storage
+      const pg = (globalThis as any).__pgUsers;
+      if (pg) {
+        await pg.updateUserPg(id, { role });
+      } else {
+        const fs = require("fs");
+        const path = require("path");
+        const usersFile = path.join(process.cwd(), "data", "users.json");
+        try {
+          const allUsers = JSON.parse(fs.readFileSync(usersFile, "utf-8"));
+          const idx = allUsers.findIndex((u: any) => u.id === id);
+          if (idx !== -1) { allUsers[idx].role = role; fs.writeFileSync(usersFile, JSON.stringify(allUsers, null, 2)); }
+        } catch {}
+      }
     }
 
     res.json({ ok: true });
   });
 
   // Delete user
-  app.delete("/api/admin/users/:id", requireAdmin, (req, res) => {
+  app.delete("/api/admin/users/:id", requireAdmin, async (req, res) => {
     const id = parseInt(req.params.id, 10);
     const adminUser = (req as AuthRequest).user!;
     if (adminUser.id === id) {
       res.status(400).json({ error: "Нельзя удалить собственный аккаунт" });
       return;
     }
-    const r = deleteUser(id);
+    const r = await deleteUserAsync(id);
     if (!r.ok) { res.status(404).json({ error: r.error }); return; }
     res.json({ ok: true });
   });
@@ -256,60 +260,52 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       const fromISO = dateFrom.toISOString();
       const toISO = dateTo.toISOString();
 
+      // Fetch all reviews in range and group in JS — works for both SQLite and PostgreSQL.
       // Use created_at (when loaded into system) for time-series grouping.
-      // review_date is the Ozon review date which may be days/weeks in the past.
-      // created_at reflects actual processing activity.
-      const rows = sqlite.prepare(`
-        SELECT
-          DATE(created_at, ?) AS day,
-          COUNT(*) AS total,
-          SUM(CASE WHEN status = 'published' AND auto_published = 1 THEN 1 ELSE 0 END) AS auto,
-          SUM(CASE WHEN status = 'published' AND auto_published = 0 THEN 1 ELSE 0 END) AS manual,
-          SUM(CASE WHEN status IN ('new', 'generating', 'pending_approval') THEN 1 ELSE 0 END) AS pending
-        FROM reviews
-        WHERE created_at >= ? AND created_at <= ?
-        GROUP BY DATE(created_at, ?)
-        ORDER BY day ASC
-      `).all(sqlTzModifier, fromISO, toISO, sqlTzModifier) as { day: string; total: number; auto: number; manual: number; pending: number }[];
+      const allReviews = await storage.getReviews();
+      const inRange = allReviews.filter((r) => {
+        const ts = r.createdAt;
+        return ts >= fromISO && ts <= toISO;
+      });
 
-      // Rating distribution: also by created_at for consistency
-      const ratingRows = sqlite.prepare(`
-        SELECT rating, COUNT(*) AS count
-        FROM reviews
-        WHERE created_at >= ? AND created_at <= ?
-        GROUP BY rating
-        ORDER BY rating ASC
-      `).all(fromISO, toISO) as { rating: number; count: number }[];
-
+      // Rating distribution
       const ratingDist: Record<number, number> = { 1: 0, 2: 0, 3: 0, 4: 0, 5: 0 };
-      for (const r of ratingRows) ratingDist[r.rating] = r.count;
+      for (const r of inRange) {
+        if (r.rating >= 1 && r.rating <= 5) ratingDist[r.rating]++;
+      }
 
       // Fill gaps: generate all days in range so chart has no holes
       const series: { day: string; total: number; auto: number; manual: number; pending: number }[] = [];
-      const rowMap = new Map(rows.map((r) => [r.day, r]));
 
       // For "day" period, group by LOCAL hour
       if (period === "day") {
-        const hourRows = sqlite.prepare(`
-          SELECT
-            strftime('%H', created_at, ?) AS hour,
-            COUNT(*) AS total,
-            SUM(CASE WHEN status = 'published' AND auto_published = 1 THEN 1 ELSE 0 END) AS auto,
-            SUM(CASE WHEN status = 'published' AND auto_published = 0 THEN 1 ELSE 0 END) AS manual,
-            SUM(CASE WHEN status IN ('new', 'generating', 'pending_approval') THEN 1 ELSE 0 END) AS pending
-          FROM reviews
-          WHERE created_at >= ? AND created_at <= ?
-          GROUP BY strftime('%H', created_at, ?)
-          ORDER BY hour ASC
-        `).all(sqlTzModifier, fromISO, toISO, sqlTzModifier) as { hour: string; total: number; auto: number; manual: number; pending: number }[];
-
-        const hourMap = new Map(hourRows.map((r) => [r.hour, r]));
+        const hourBuckets: Record<string, { total: number; auto: number; manual: number; pending: number }> = {};
+        for (const r of inRange) {
+          const localDate = new Date(new Date(r.createdAt).getTime() + tzShiftMs);
+          const hour = String(localDate.getUTCHours()).padStart(2, "0");
+          if (!hourBuckets[hour]) hourBuckets[hour] = { total: 0, auto: 0, manual: 0, pending: 0 };
+          hourBuckets[hour].total++;
+          if (r.status === "published" && r.autoPublished) hourBuckets[hour].auto++;
+          else if (r.status === "published" && !r.autoPublished) hourBuckets[hour].manual++;
+          else if (["new", "generating", "pending_approval"].includes(r.status)) hourBuckets[hour].pending++;
+        }
         for (let h = 0; h < 24; h++) {
           const key = String(h).padStart(2, "0");
-          const found = hourMap.get(key);
+          const found = hourBuckets[key];
           series.push({ day: `${key}:00`, total: found?.total ?? 0, auto: found?.auto ?? 0, manual: found?.manual ?? 0, pending: found?.pending ?? 0 });
         }
       } else {
+        // Group by local day
+        const dayBuckets: Record<string, { total: number; auto: number; manual: number; pending: number }> = {};
+        for (const r of inRange) {
+          const localDate = new Date(new Date(r.createdAt).getTime() + tzShiftMs);
+          const key = localDate.toISOString().slice(0, 10);
+          if (!dayBuckets[key]) dayBuckets[key] = { total: 0, auto: 0, manual: 0, pending: 0 };
+          dayBuckets[key].total++;
+          if (r.status === "published" && r.autoPublished) dayBuckets[key].auto++;
+          else if (r.status === "published" && !r.autoPublished) dayBuckets[key].manual++;
+          else if (["new", "generating", "pending_approval"].includes(r.status)) dayBuckets[key].pending++;
+        }
         // Fill by local day
         const cur = new Date(dateFrom.getTime() + tzShiftMs); // shift to local
         cur.setUTCHours(0, 0, 0, 0);
@@ -317,7 +313,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
         end.setUTCHours(0, 0, 0, 0);
         while (cur <= end) {
           const key = cur.toISOString().slice(0, 10);
-          const found = rowMap.get(key);
+          const found = dayBuckets[key];
           series.push({ day: key, total: found?.total ?? 0, auto: found?.auto ?? 0, manual: found?.manual ?? 0, pending: found?.pending ?? 0 });
           cur.setUTCDate(cur.getUTCDate() + 1);
         }

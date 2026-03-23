@@ -7,9 +7,7 @@ import {
 } from "@shared/schema";
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from "fs";
 import { join } from "path";
-import Database from "better-sqlite3";
-import { drizzle } from "drizzle-orm/better-sqlite3";
-import { eq, and, sql } from "drizzle-orm";
+import { eq, sql } from "drizzle-orm";
 
 const DATA_DIR = join(process.cwd(), "data");
 const SETTINGS_FILE = join(DATA_DIR, "settings.json");
@@ -21,72 +19,83 @@ function ensureDataDir() {
   if (!existsSync(DATA_DIR)) mkdirSync(DATA_DIR, { recursive: true });
 }
 
-// ── SQLite setup ───────────────────────────────────────────────────────────────
-ensureDataDir();
-export const sqlite = new Database(DB_SQLITE_FILE);
-// Enable WAL mode for better concurrent read performance
-sqlite.pragma("journal_mode = WAL");
-sqlite.pragma("synchronous = NORMAL");
-const db = drizzle(sqlite);
+// ── SQLite setup (lazy — only initialized when DATABASE_URL is NOT set) ────────
+let _sqlite: any = null;
+let _db: any = null;
 
-// Create tables if they don't exist
-sqlite.exec(`
-  CREATE TABLE IF NOT EXISTS reviews (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    ozon_review_id TEXT NOT NULL UNIQUE,
-    product_id TEXT NOT NULL,
-    product_name TEXT NOT NULL DEFAULT '',
-    author_name TEXT NOT NULL DEFAULT '',
-    rating INTEGER NOT NULL DEFAULT 5,
-    review_text TEXT NOT NULL DEFAULT '',
-    review_date TEXT NOT NULL DEFAULT '',
-    has_photos INTEGER NOT NULL DEFAULT 0,
-    status TEXT NOT NULL DEFAULT 'new',
-    ozon_sku TEXT NOT NULL DEFAULT '',
-    ozon_status TEXT NOT NULL DEFAULT '',
-    is_answered INTEGER NOT NULL DEFAULT 0,
-    auto_published INTEGER NOT NULL DEFAULT 0,
-    created_at TEXT NOT NULL DEFAULT '',
-    updated_at TEXT NOT NULL DEFAULT ''
-  );
+function getSqlite() {
+  if (!_sqlite) {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const Database = require("better-sqlite3");
+    ensureDataDir();
+    _sqlite = new Database(DB_SQLITE_FILE);
+    _sqlite.pragma("journal_mode = WAL");
+    _sqlite.pragma("synchronous = NORMAL");
 
-  CREATE TABLE IF NOT EXISTS responses (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    review_id INTEGER NOT NULL,
-    response_text TEXT NOT NULL DEFAULT '',
-    ai_generated INTEGER NOT NULL DEFAULT 1,
-    sheets_row_id TEXT NOT NULL DEFAULT '',
-    original_ai_text TEXT NOT NULL DEFAULT '',
-    approved_at TEXT,
-    published_at TEXT,
-    created_at TEXT NOT NULL DEFAULT '',
-    updated_at TEXT NOT NULL DEFAULT ''
-  );
+    const { drizzle } = require("drizzle-orm/better-sqlite3");
+    _db = drizzle(_sqlite);
 
-  CREATE INDEX IF NOT EXISTS idx_reviews_ozon_id ON reviews(ozon_review_id);
-  CREATE INDEX IF NOT EXISTS idx_reviews_status ON reviews(status);
-  CREATE INDEX IF NOT EXISTS idx_responses_review_id ON responses(review_id);
+    // Create tables if they don't exist
+    _sqlite.exec(`
+      CREATE TABLE IF NOT EXISTS reviews (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        ozon_review_id TEXT NOT NULL UNIQUE,
+        product_id TEXT NOT NULL,
+        product_name TEXT NOT NULL DEFAULT '',
+        author_name TEXT NOT NULL DEFAULT '',
+        rating INTEGER NOT NULL DEFAULT 5,
+        review_text TEXT NOT NULL DEFAULT '',
+        review_date TEXT NOT NULL DEFAULT '',
+        has_photos INTEGER NOT NULL DEFAULT 0,
+        status TEXT NOT NULL DEFAULT 'new',
+        ozon_sku TEXT NOT NULL DEFAULT '',
+        ozon_status TEXT NOT NULL DEFAULT '',
+        is_answered INTEGER NOT NULL DEFAULT 0,
+        auto_published INTEGER NOT NULL DEFAULT 0,
+        created_at TEXT NOT NULL DEFAULT '',
+        updated_at TEXT NOT NULL DEFAULT ''
+      );
 
-  -- History of all published responses (persists across clearAllData)
-  CREATE TABLE IF NOT EXISTS publish_history (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    ozon_review_id TEXT NOT NULL,
-    ozon_sku TEXT NOT NULL DEFAULT '',
-    product_name TEXT NOT NULL DEFAULT '',
-    author_name TEXT NOT NULL DEFAULT '',
-    rating INTEGER NOT NULL DEFAULT 5,
-    review_text TEXT NOT NULL DEFAULT '',
-    response_text TEXT NOT NULL DEFAULT '',
-    original_ai_text TEXT NOT NULL DEFAULT '',
-    auto_published INTEGER NOT NULL DEFAULT 0,
-    published_at TEXT NOT NULL DEFAULT ''
-  );
-  CREATE INDEX IF NOT EXISTS idx_publish_history_published_at ON publish_history(published_at);
-  CREATE INDEX IF NOT EXISTS idx_publish_history_ozon_id ON publish_history(ozon_review_id);
-`);
+      CREATE TABLE IF NOT EXISTS responses (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        review_id INTEGER NOT NULL,
+        response_text TEXT NOT NULL DEFAULT '',
+        ai_generated INTEGER NOT NULL DEFAULT 1,
+        sheets_row_id TEXT NOT NULL DEFAULT '',
+        original_ai_text TEXT NOT NULL DEFAULT '',
+        approved_at TEXT,
+        published_at TEXT,
+        created_at TEXT NOT NULL DEFAULT '',
+        updated_at TEXT NOT NULL DEFAULT ''
+      );
 
-// ── Migrations (run once, idempotent)
-try { sqlite.exec("ALTER TABLE publish_history ADD COLUMN original_ai_text TEXT NOT NULL DEFAULT ''"); } catch {}
+      CREATE INDEX IF NOT EXISTS idx_reviews_ozon_id ON reviews(ozon_review_id);
+      CREATE INDEX IF NOT EXISTS idx_reviews_status ON reviews(status);
+      CREATE INDEX IF NOT EXISTS idx_responses_review_id ON responses(review_id);
+
+      -- History of all published responses (persists across clearAllData)
+      CREATE TABLE IF NOT EXISTS publish_history (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        ozon_review_id TEXT NOT NULL,
+        ozon_sku TEXT NOT NULL DEFAULT '',
+        product_name TEXT NOT NULL DEFAULT '',
+        author_name TEXT NOT NULL DEFAULT '',
+        rating INTEGER NOT NULL DEFAULT 5,
+        review_text TEXT NOT NULL DEFAULT '',
+        response_text TEXT NOT NULL DEFAULT '',
+        original_ai_text TEXT NOT NULL DEFAULT '',
+        auto_published INTEGER NOT NULL DEFAULT 0,
+        published_at TEXT NOT NULL DEFAULT ''
+      );
+      CREATE INDEX IF NOT EXISTS idx_publish_history_published_at ON publish_history(published_at);
+      CREATE INDEX IF NOT EXISTS idx_publish_history_ozon_id ON publish_history(ozon_review_id);
+    `);
+
+    // Migrations (run once, idempotent)
+    try { _sqlite.exec("ALTER TABLE publish_history ADD COLUMN original_ai_text TEXT NOT NULL DEFAULT ''"); } catch {}
+  }
+  return { sqlite: _sqlite, db: _db };
+}
 
 // ── Helpers ────────────────────────────────────────────────────────────────────
 function now(): string {
@@ -169,6 +178,7 @@ class SqliteStorage implements IStorage {
 
   // ── Reviews ───────────────────────────────────────────────────────────────
   private attachResponse(review: Review): ReviewWithResponse {
+    const { db } = getSqlite();
     const resp = db.select().from(responsesTable)
       .where(eq(responsesTable.reviewId, review.id))
       .get();
@@ -178,9 +188,10 @@ class SqliteStorage implements IStorage {
   }
 
   async getReviews(filters?: { status?: string; rating?: number }): Promise<ReviewWithResponse[]> {
-    let query = db.select().from(reviewsTable);
+    const { db } = getSqlite();
+    const query = db.select().from(reviewsTable);
     const rows = query.orderBy(sql`${reviewsTable.createdAt} DESC`).all();
-    let result = rows
+    const result = rows
       .map(rowToReview)
       .filter(r => {
         if (filters?.status && r.status !== filters.status) return false;
@@ -191,12 +202,14 @@ class SqliteStorage implements IStorage {
   }
 
   async getReviewById(id: number): Promise<ReviewWithResponse | null> {
+    const { db } = getSqlite();
     const row = db.select().from(reviewsTable).where(eq(reviewsTable.id, id)).get();
     if (!row) return null;
     return this.attachResponse(rowToReview(row));
   }
 
   async getReviewByOzonId(ozonReviewId: string): Promise<ReviewWithResponse | null> {
+    const { db } = getSqlite();
     const row = db.select().from(reviewsTable)
       .where(eq(reviewsTable.ozonReviewId, ozonReviewId))
       .get();
@@ -205,6 +218,7 @@ class SqliteStorage implements IStorage {
   }
 
   async createReview(data: InsertReview): Promise<Review> {
+    const { db } = getSqlite();
     const ts = now();
     const row = db.insert(reviewsTable).values({
       ...data,
@@ -219,6 +233,7 @@ class SqliteStorage implements IStorage {
   }
 
   async updateReviewStatus(id: number, status: string, extra?: Record<string, unknown>): Promise<Review> {
+    const { db } = getSqlite();
     // Convert booleans to integers for SQLite
     const clean: Record<string, unknown> = { status, updatedAt: now() };
     for (const [k, v] of Object.entries(extra ?? {})) {
@@ -235,6 +250,7 @@ class SqliteStorage implements IStorage {
 
   // ── Responses ─────────────────────────────────────────────────────────────
   async getResponseByReviewId(reviewId: number): Promise<Response | null> {
+    const { db } = getSqlite();
     const row = db.select().from(responsesTable)
       .where(eq(responsesTable.reviewId, reviewId))
       .get();
@@ -242,6 +258,7 @@ class SqliteStorage implements IStorage {
   }
 
   async createResponse(data: InsertResponse): Promise<Response> {
+    const { db } = getSqlite();
     const ts = now();
     const row = db.insert(responsesTable).values({
       ...data,
@@ -255,6 +272,7 @@ class SqliteStorage implements IStorage {
   }
 
   async updateResponse(id: number, data: Partial<InsertResponse & { originalAiText?: string }>): Promise<Response> {
+    const { db } = getSqlite();
     // Convert any Date values to ISO strings for SQLite
     const clean: Record<string, unknown> = { updatedAt: now() };
     for (const [k, v] of Object.entries(data)) {
@@ -271,6 +289,7 @@ class SqliteStorage implements IStorage {
 
   // ── Stats ─────────────────────────────────────────────────────────────────
   async getStats() {
+    const { db } = getSqlite();
     const all = db.select().from(reviewsTable).all();
     return {
       total: all.length,
@@ -296,6 +315,7 @@ class SqliteStorage implements IStorage {
     autoPublished: boolean;
     publishedAt: string;
   }): void {
+    const { sqlite } = getSqlite();
     // Skip if already recorded (idempotent)
     const exists = sqlite.prepare("SELECT id FROM publish_history WHERE ozon_review_id = ?").get(entry.ozonReviewId);
     if (exists) return;
@@ -317,6 +337,7 @@ class SqliteStorage implements IStorage {
   }
 
   getPublishHistory(from?: string, to?: string): any[] {
+    const { sqlite } = getSqlite();
     let query = "SELECT * FROM publish_history";
     const params: string[] = [];
     if (from && to) {
@@ -335,6 +356,7 @@ class SqliteStorage implements IStorage {
 
   // ── Clear ──────────────────────────────────────────────────────────────────
   async clearAllData(): Promise<void> {
+    const { db } = getSqlite();
     db.delete(responsesTable).run();
     db.delete(reviewsTable).run();
     // publish_history is intentionally NOT cleared — it's the permanent archive
@@ -343,33 +365,6 @@ class SqliteStorage implements IStorage {
 }
 
 export const storage = new SqliteStorage();
-
-// Reset any reviews stuck in 'generating' on startup (caused by server restart mid-generation)
-try {
-  const stuck = sqlite.prepare("UPDATE reviews SET status='new', updated_at=? WHERE status='generating'").run(new Date().toISOString());
-  if (stuck.changes > 0) {
-    console.log(`[startup] Reset ${stuck.changes} stuck 'generating' review(s) to 'new'`);
-  }
-} catch (e) {
-  console.error("[startup] Failed to reset stuck reviews:", e);
-}
-
-// Backfill published IDs from existing DB on startup
-try {
-  const pub = loadPublishedIds();
-  const rows = db.select({
-    ozonReviewId: reviewsTable.ozonReviewId,
-    status: reviewsTable.status,
-  }).from(reviewsTable).all();
-  const before = pub.size;
-  rows.filter(r => r.status === "published").forEach(r => pub.add(r.ozonReviewId));
-  if (pub.size > before) {
-    writeFileSync(PUBLISHED_IDS_FILE, JSON.stringify([...pub], null, 2), "utf-8");
-    console.log(`[backfill] Added ${pub.size - before} published IDs (total: ${pub.size})`);
-  }
-} catch (e) {
-  console.error("[backfill] Failed:", e);
-}
 
 // ── Auto-select storage backend ───────────────────────────────────────────────
 // If DATABASE_URL is set → use PostgreSQL (Timeweb App Platform)
@@ -390,6 +385,35 @@ export async function initStorage(): Promise<void> {
     (globalThis as any).__pgUsers = { loadUsersPg, saveUserPg, updateUserPg, deleteUserPg };
     console.log("[storage] Using PostgreSQL backend");
   } else {
+    // Only initialize SQLite when DATABASE_URL is NOT set
+    getSqlite(); // triggers lazy init + backfill
+    const { sqlite } = getSqlite();
+    // Reset any reviews stuck in 'generating' on startup
+    try {
+      const stuck = sqlite.prepare("UPDATE reviews SET status='new', updated_at=? WHERE status='generating'").run(new Date().toISOString());
+      if (stuck.changes > 0) {
+        console.log(`[startup] Reset ${stuck.changes} stuck 'generating' review(s) to 'new'`);
+      }
+    } catch (e) {
+      console.error("[startup] Failed to reset stuck reviews:", e);
+    }
+    // Backfill published IDs from existing DB on startup
+    try {
+      const { db } = getSqlite();
+      const pub = loadPublishedIds();
+      const rows = db.select({
+        ozonReviewId: reviewsTable.ozonReviewId,
+        status: reviewsTable.status,
+      }).from(reviewsTable).all();
+      const before = pub.size;
+      rows.filter((r: any) => r.status === "published").forEach((r: any) => pub.add(r.ozonReviewId));
+      if (pub.size > before) {
+        writeFileSync(PUBLISHED_IDS_FILE, JSON.stringify([...pub], null, 2), "utf-8");
+        console.log(`[backfill] Added ${pub.size - before} published IDs (total: ${pub.size})`);
+      }
+    } catch (e) {
+      console.error("[backfill] Failed:", e);
+    }
     console.log("[storage] Using SQLite backend");
   }
 }
