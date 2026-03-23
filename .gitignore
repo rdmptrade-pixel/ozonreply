@@ -1,0 +1,34 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+
+# Local data — NEVER commit (contains secrets and database)
+data/
+*.db
+*.db-shm
+*.db-wal
+
+# Environment secrets
+.env
+.env.*
+!.env.example
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+
+# Logs
+*.log
+npm-debug.log*
+
+# Temporary build artifacts
+vite.config.ts.*
+server/public/
+*.tar.gz
+*.zip
