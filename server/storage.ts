@@ -372,7 +372,7 @@ export const storage = new SqliteStorage();
 export let activeStorage: any = storage; // SQLite by default
 
 export async function initStorage(): Promise<void> {
-  if (process.env.PG_CONNECTION_STRING || process.env.DATABASE_URL) {
+ if (process.env.PG_CONNECTION_STRING) {
     const { PgStorage, initPgDatabase, loadPublishedIdsPg, markPublishedIdPg,
             loadUsersPg, saveUserPg, updateUserPg, deleteUserPg } = await import("./storage-pg");
     const pgStore = new PgStorage();
