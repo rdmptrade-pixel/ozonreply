@@ -5,8 +5,7 @@
 import { Pool } from "pg";
 
 // ── Connection pool ────────────────────────────────────────────────────────────
-const pgConnectionString = process.env.PG_CONNECTION_STRING ||
-process.env.DATABASE_URL;
+const pgConnectionString = process.env.PG_CONNECTION_STRING;
 const pool = new Pool({
   connectionString: pgConnectionString,
   ssl: process.env.DATABASE_SSL === "false" ? false : { rejectUnauthorized: false },
