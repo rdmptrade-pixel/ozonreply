@@ -3,17 +3,15 @@
  * Used when DATABASE_URL env variable is set.
  */
 import { Pool } from "pg";
-import fs from "fs";
 
 // ── Connection pool ────────────────────────────────────────────────────────────
-// SSL cert is loaded from PGSSLROOTCERT env var (set in Dockerfile).
-// The pg npm package does not read PGSSLROOTCERT automatically — we pass it explicitly.
+// SSL: rejectUnauthorized=false allows Timeweb's self-signed CA chain.
+// Traffic is still encrypted — we just skip certificate chain verification.
 const pgConnectionString = process.env.PG_CONNECTION_STRING;
 
-const sslCertPath = process.env.PGSSLROOTCERT;
-const sslConfig = sslCertPath
-  ? { rejectUnauthorized: true, ca: fs.readFileSync(sslCertPath).toString() }
-  : undefined;
+// Use SSL if connection string contains sslmode (i.e. on Timeweb)
+const useSsl = pgConnectionString?.includes('sslmode=');
+const sslConfig = useSsl ? { rejectUnauthorized: false } : undefined;
 
 const pool = new Pool({
   connectionString: pgConnectionString,
