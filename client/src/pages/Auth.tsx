@@ -73,23 +73,12 @@ export default function AuthPage() {
           <ShoppingBag size={20} className="text-primary-foreground" />
         </div>
         <div>
-          <div className="font-bold text-base leading-tight">OzonReply</div>
-          <div className="text-xs text-muted-foreground leading-tight">Ответы на отзывы</div>
+          <div className="font-bold text-base leading-tight">AI Автомат</div>
+          <div className="text-xs text-muted-foreground leading-tight">Управление отзывами</div>
         </div>
       </div>
 
-        {/* Open-in-browser hint — password autofill works outside iframe */}
-        <div className="w-full max-w-sm mb-3 px-1">
-          <a
-            href="https://www.perplexity.ai/computer/a/ozonreply-otvety-na-otzyvy-XwLd4I0zT7OjiOa.lAUbdg"
-            target="_blank"
-            rel="noopener noreferrer"
-            className="text-xs text-muted-foreground hover:text-foreground flex items-center gap-1.5 transition-colors"
-          >
-            <ExternalLink size={12} />
-            Открыть в отдельной вкладке — пароль вставится автоматически
-          </a>
-        </div>
+
 
       <Card className="w-full max-w-sm">
         <CardHeader className="pb-4">
@@ -99,7 +88,7 @@ export default function AuthPage() {
           <CardDescription className="text-xs">
             {mode === "login"
               ? "Введите email и пароль для входа"
-              : "Создайте аккаунт — администратор одобрит его"}
+              : "Создайте аккаунт для работы с сервисом"}
           </CardDescription>
         </CardHeader>
 
