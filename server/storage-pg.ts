@@ -3,11 +3,21 @@
  * Used when DATABASE_URL env variable is set.
  */
 import { Pool } from "pg";
+import fs from "fs";
 
 // ── Connection pool ────────────────────────────────────────────────────────────
+// SSL cert is loaded from PGSSLROOTCERT env var (set in Dockerfile).
+// The pg npm package does not read PGSSLROOTCERT automatically — we pass it explicitly.
 const pgConnectionString = process.env.PG_CONNECTION_STRING;
+
+const sslCertPath = process.env.PGSSLROOTCERT;
+const sslConfig = sslCertPath
+  ? { rejectUnauthorized: true, ca: fs.readFileSync(sslCertPath).toString() }
+  : undefined;
+
 const pool = new Pool({
   connectionString: pgConnectionString,
+  ssl: sslConfig,
   max: 10,
 });
 
