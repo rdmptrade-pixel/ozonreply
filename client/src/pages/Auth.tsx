@@ -73,7 +73,7 @@ export default function AuthPage() {
           <ShoppingBag size={20} className="text-primary-foreground" />
         </div>
         <div>
-          <div className="font-bold text-base leading-tight">AI Автомат</div>
+          <div className="font-bold text-base leading-tight" translate="no">AI Автомат</div>
           <div className="text-xs text-muted-foreground leading-tight">Управление отзывами</div>
         </div>
       </div>
