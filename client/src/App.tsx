@@ -85,8 +85,8 @@ function Layout({ children }: { children: React.ReactNode }) {
               <ShoppingBag size={16} className="text-primary-foreground" />
             </div>
             <div>
-              <div className="font-semibold text-sm leading-tight">OzonReply</div>
-              <div className="text-xs text-muted-foreground leading-tight">Ответы на отзывы</div>
+              <div className="font-semibold text-sm leading-tight">AI Автомат</div>
+              <div className="text-xs text-muted-foreground leading-tight">Управление отзывами</div>
             </div>
           </div>
         </div>
@@ -139,7 +139,7 @@ function Layout({ children }: { children: React.ReactNode }) {
             <div className="w-7 h-7 rounded-md bg-primary flex items-center justify-center">
               <ShoppingBag size={14} className="text-primary-foreground" />
             </div>
-            <span className="font-semibold text-sm">OzonReply</span>
+            <span className="font-semibold text-sm">AI Автомат</span>
           </div>
           <div className="flex items-center gap-1">
             <button
