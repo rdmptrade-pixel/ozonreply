@@ -5,17 +5,13 @@
 import { Pool } from "pg";
 
 // ── Connection pool ────────────────────────────────────────────────────────────
-// SSL: rejectUnauthorized=false allows Timeweb's self-signed CA chain.
-// Traffic is still encrypted — we just skip certificate chain verification.
+// SSL: always use rejectUnauthorized=false.
+// Timeweb uses a self-signed CA chain — we encrypt traffic but skip chain verification.
 const pgConnectionString = process.env.PG_CONNECTION_STRING;
-
-// Use SSL if connection string contains sslmode (i.e. on Timeweb)
-const useSsl = pgConnectionString?.includes('sslmode=');
-const sslConfig = useSsl ? { rejectUnauthorized: false } : undefined;
 
 const pool = new Pool({
   connectionString: pgConnectionString,
-  ssl: sslConfig,
+  ssl: { rejectUnauthorized: false },
   max: 10,
 });
 
