@@ -556,7 +556,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     // Reviews queued for background auto-publish (4-5★ no text)
     const autoPublishQueue: number[] = [];
     // Load persisted published IDs — survives clearAllData()
-    const publishedIds = loadPublishedIds();
+    const publishedIds = await loadPublishedIds();
 
 
     try {
