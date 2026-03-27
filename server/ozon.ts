@@ -490,8 +490,15 @@ export async function fetchOzonQuestions(
 
   const data = await response.json() as OzonQuestionsResponse;
 
-  // Normalize: POST /v1/question/list returns { questions, has_next, last_id }
+  // Log first item to see real field names from Ozon API
   const rawItems = data.questions ?? data.result?.questions ?? data.items ?? [];
+  if (rawItems.length > 0) {
+    console.log("[ozon/questions] First item keys:", Object.keys(rawItems[0]));
+    console.log("[ozon/questions] First item sample:", JSON.stringify(rawItems[0]).slice(0, 500));
+  } else {
+    console.log("[ozon/questions] Response keys:", Object.keys(data));
+    console.log("[ozon/questions] Full response:", JSON.stringify(data).slice(0, 500));
+  }
   const hasNext = data.has_next ?? data.result?.has_next ?? false;
   const nextLastId = data.last_id ?? data.result?.last_id ?? "";
 
