@@ -427,12 +427,20 @@ export interface OzonQuestion {
 }
 
 interface OzonQuestionItem {
-  question_id: string;
+  // Ozon may use different field names across API versions
+  question_id?: string;
+  id?: string;
+  uuid?: string;
   sku?: number;
-  product?: { id?: string; name?: string; sku?: number };
+  product_id?: number | string;
+  product?: { id?: string | number; name?: string; sku?: number };
   author?: { name?: string };
+  author_name?: string;
   created_at?: string;
+  date?: string;
   text?: string;
+  body?: string;
+  content?: string;
   is_answered?: boolean;
   status?: string;
 }
@@ -502,16 +510,31 @@ export async function fetchOzonQuestions(
   const hasNext = data.has_next ?? data.result?.has_next ?? false;
   const nextLastId = data.last_id ?? data.result?.last_id ?? "";
 
-  const normalized: OzonQuestion[] = rawItems.map((item) => ({
-    question_id: item.question_id,
-    sku: item.sku ?? item.product?.sku ?? 0,
-    product_id: String(item.product?.id ?? item.sku ?? ""),
-    product_name: item.product?.name ?? "",
-    author_name: item.author?.name ?? "",
-    created_at: item.created_at ?? new Date().toISOString(),
-    question_text: item.text ?? "",
-    is_answered: item.is_answered ?? false,
-  }));
+  const normalized: OzonQuestion[] = rawItems.map((item) => {
+    // Normalize ID: try all known field names
+    const qId = item.question_id ?? item.id ?? item.uuid ?? "";
+    const qText = item.text ?? item.body ?? item.content ?? "";
+    const qDate = item.created_at ?? item.date ?? new Date().toISOString();
+    const authorName = item.author?.name ?? item.author_name ?? "";
+    const sku = item.sku ?? item.product?.sku ?? 0;
+    const productId = String(item.product?.id ?? item.product_id ?? sku ?? "");
+    const productName = item.product?.name ?? "";
+
+    if (!qId) {
+      console.warn("[ozon/questions] Item has no question_id, keys:", Object.keys(item));
+    }
+
+    return {
+      question_id: qId,
+      sku,
+      product_id: productId,
+      product_name: productName,
+      author_name: authorName,
+      created_at: qDate,
+      question_text: qText,
+      is_answered: item.is_answered ?? false,
+    };
+  }).filter(q => q.question_id); // skip items without ID
 
   return { questions: normalized, hasNext, lastId: nextLastId };
 }
