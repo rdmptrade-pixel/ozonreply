@@ -1400,7 +1400,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
           const products = await fetchOzonProductInfo(settings.ozonClientId, settings.ozonApiKey, batch);
           console.log(`[products/sync-info] Batch ${i}-${i+BATCH}: got ${products.length} products`);
           for (const p of products) {
-            if (!p.sku) continue;
+            if (!p.sku || !p.name) continue;
             await (storage as any).upsertProductCache({
               ozonSku: p.sku,
               productId: p.productId,
@@ -1408,6 +1408,13 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
               description: p.description || "",
               attributes: p.attributes || "",
             });
+            // Update product_name in ALL questions with this SKU (overwrite with real name)
+            try {
+              await pool.query(
+                "UPDATE questions SET product_name = $1 WHERE ozon_sku = $2",
+                [p.name, p.sku]
+              );
+            } catch {}
             synced++;
           }
         } catch (e) {
