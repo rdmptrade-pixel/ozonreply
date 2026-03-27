@@ -227,26 +227,40 @@ export class PgStorage {
       await pool.query("ALTER TABLE settings ADD COLUMN IF NOT EXISTS question_api_key TEXT NOT NULL DEFAULT ''");
     } catch {}
 
-    const envSettings = this._getEnvSettings();
-    if (envSettings) return envSettings;
-
+    // Always read from DB first
     const r = await pool.query("SELECT * FROM settings WHERE id = 1");
-    if (r.rowCount === 0) return null;
-    const row = r.rows[0];
+    const dbRow = r.rowCount && r.rowCount > 0 ? r.rows[0] : null;
+
+    // ENV overrides for core credentials, but DB values win for user-managed fields
+    const envSettings = this._getEnvSettings();
+    if (envSettings) {
+      return {
+        ...envSettings,
+        // These fields are managed via UI — prefer DB value if set
+        questionApiKey: dbRow?.question_api_key || envSettings.questionApiKey || "",
+        questionTemplate: dbRow?.question_template || envSettings.questionTemplate || "",
+        responseTemplate: dbRow?.response_template || envSettings.responseTemplate || "",
+        googleSheetsId: dbRow?.google_sheets_id || envSettings.googleSheetsId || "",
+        autoPublish: dbRow?.auto_publish ?? envSettings.autoPublish,
+        syncInterval: dbRow?.sync_interval ?? envSettings.syncInterval,
+      };
+    }
+
+    if (!dbRow) return null;
     return {
       id: 1,
-      ozonClientId: row.ozon_client_id,
-      ozonApiKey: row.ozon_api_key,
-      questionApiKey: row.question_api_key ?? "",
-      openaiApiKey: row.openai_api_key,
-      deepseekApiKey: row.deepseek_api_key,
-      perplexityApiKey: row.perplexity_api_key,
-      aiProvider: row.ai_provider,
-      googleSheetsId: row.google_sheets_id,
-      responseTemplate: row.response_template,
-      questionTemplate: row.question_template ?? "",
-      autoPublish: row.auto_publish,
-      syncInterval: row.sync_interval,
+      ozonClientId: dbRow.ozon_client_id,
+      ozonApiKey: dbRow.ozon_api_key,
+      questionApiKey: dbRow.question_api_key ?? "",
+      openaiApiKey: dbRow.openai_api_key,
+      deepseekApiKey: dbRow.deepseek_api_key,
+      perplexityApiKey: dbRow.perplexity_api_key,
+      aiProvider: dbRow.ai_provider,
+      googleSheetsId: dbRow.google_sheets_id,
+      responseTemplate: dbRow.response_template,
+      questionTemplate: dbRow.question_template ?? "",
+      autoPublish: dbRow.auto_publish,
+      syncInterval: dbRow.sync_interval,
     };
   }
 
