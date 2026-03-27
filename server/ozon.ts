@@ -633,8 +633,8 @@ export async function fetchOzonProductInfo(
 ): Promise<OzonProductInfo[]> {
   if (!skus.length) return [];
 
-  // POST /v2/product/info/list accepts { sku: number[] }
-  const response = await fetch("https://api-seller.ozon.ru/v2/product/info/list", {
+  // POST /v3/product/info/list accepts { sku: number[] }
+  const response = await fetch("https://api-seller.ozon.ru/v3/product/info/list", {
     method: "POST",
     headers: {
       "Client-Id": clientId,

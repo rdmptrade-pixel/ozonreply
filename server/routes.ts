@@ -1369,9 +1369,11 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
         headers: { "Client-Id": settings.ozonClientId, "Api-Key": settings.ozonApiKey, "Content-Type": "application/json" },
         body: JSON.stringify({ sku: [Number(sku)] }),
       });
-      const raw = await resp.json() as any;
-      const item = raw.result?.items?.[0] ?? raw.items?.[0] ?? raw;
-      res.json({ sku, status: resp.status, topKeys: Object.keys(raw), itemKeys: item ? Object.keys(item) : [], item });
+      const text = await resp.text();
+      let raw: any;
+      try { raw = JSON.parse(text); } catch { res.json({ sku, status: resp.status, raw_text: text.slice(0, 500) }); return; }
+      const item = raw.result?.items?.[0] ?? raw.items?.[0] ?? null;
+      res.json({ sku, status: resp.status, topKeys: Object.keys(raw), itemKeys: item ? Object.keys(item) : [], name: item?.name, description_len: item?.description?.length ?? 0 });
     } catch(e) { res.json({ error: String(e) }); }
   });
 
