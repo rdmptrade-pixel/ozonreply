@@ -26,8 +26,12 @@ function markPublishedId(ozonReviewId: string): void {
 }
 
 import { fetchOzonReviewsStreaming, postOzonResponse, testOzonCredentials, parseOzonCsvReviews, OzonPremiumPlusError, fetchOzonQuestions, postOzonQuestionAnswer, fetchOzonQuestionAnswers, fetchOzonProductInfo, fetchAllOzonProductIds, fetchOzonProductInfoByOfferIds } from "./ozon";
-import { Pool } from "pg";
-const pool = new Pool({ connectionString: process.env.PG_CONNECTION_STRING, ssl: { rejectUnauthorized: false } });
+// Use pg pool only if PG_CONNECTION_STRING is available (lazy import)
+async function pgQuery(sql: string, params?: any[]): Promise<any> {
+  const { Pool } = await import("pg");
+  const p = new (Pool as any)({ connectionString: process.env.PG_CONNECTION_STRING, ssl: { rejectUnauthorized: false }, max: 2 });
+  try { return await p.query(sql, params); } finally { await p.end(); }
+}
 import { generateAiResponse, generateQuestionAnswer, type AiProvider } from "./ai";
 import {
   registerUser,
@@ -1370,7 +1374,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       let allSkus: string[] = [];
       try {
         // Try PG direct query first
-        const skuRows = await pool.query(
+        const skuRows = await pgQuery(
           "SELECT DISTINCT ozon_sku FROM questions WHERE ozon_sku != '' AND ozon_sku ~ '^[0-9]+$' ORDER BY ozon_sku"
         );
         allSkus = skuRows.rows.map((r: any) => r.ozon_sku).filter(Boolean);
@@ -1411,7 +1415,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
             });
             // Update product_name in ALL questions with this SKU (overwrite with real name)
             try {
-              await pool.query(
+              await pgQuery(
                 "UPDATE questions SET product_name = $1 WHERE ozon_sku = $2",
                 [p.name, p.sku]
               );
@@ -1474,7 +1478,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
             // Обновить product_name в вопросах если SKU совпадает
             if (p.sku) {
               try {
-                await pool.query("UPDATE questions SET product_name=$1 WHERE ozon_sku=$2", [p.name, p.sku]);
+                await pgQuery("UPDATE questions SET product_name=$1 WHERE ozon_sku=$2", [p.name, p.sku]);
               } catch {}
             }
             synced++;
