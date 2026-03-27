@@ -481,7 +481,11 @@ export async function fetchOzonQuestions(
 
   if (!response.ok) {
     const text = await response.text();
-    throw new Error(`Ozon Questions API error ${response.status}: ${text}`);
+    let hint = "";
+    if (response.status === 400 && text.includes("Invalid Api-Key")) {
+      hint = " → Проверьте Question API Key в Настройках. Ключ должен иметь роль с доступом к /v1/question/list (не 'read only' для отзывов).";
+    }
+    throw new Error(`Ozon Questions API error ${response.status}: ${text}${hint}`);
   }
 
   const data = await response.json() as OzonQuestionsResponse;
