@@ -1356,6 +1356,25 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     }
   });
 
+  // GET /api/products/debug-one — проверить реальный ответ /v2/product/info/list для одного SKU
+  app.get("/api/products/debug-one", async (_req, res) => {
+    try {
+      const settings = await storage.getSettings();
+      // Берём первый SKU из questions
+      const r = await pool.query("SELECT DISTINCT ozon_sku FROM questions WHERE ozon_sku ~ '^[0-9]+$' LIMIT 1");
+      const sku = r.rows[0]?.ozon_sku;
+      if (!sku) { res.json({ error: "no sku found" }); return; }
+      const resp = await fetch("https://api-seller.ozon.ru/v2/product/info/list", {
+        method: "POST",
+        headers: { "Client-Id": settings.ozonClientId, "Api-Key": settings.ozonApiKey, "Content-Type": "application/json" },
+        body: JSON.stringify({ sku: [Number(sku)] }),
+      });
+      const raw = await resp.json() as any;
+      const item = raw.result?.items?.[0] ?? raw.items?.[0] ?? raw;
+      res.json({ sku, status: resp.status, topKeys: Object.keys(raw), itemKeys: item ? Object.keys(item) : [], item });
+    } catch(e) { res.json({ error: String(e) }); }
+  });
+
   // POST /api/products/sync-info — загрузить описания товаров из Ozon по всем SKU в базе
   app.post("/api/products/sync-info", requireAuth, async (_req, res) => {
     try {
