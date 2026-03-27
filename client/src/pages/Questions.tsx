@@ -1,5 +1,6 @@
 import { useQuery, useMutation } from "@tanstack/react-query";
 import { apiRequest, queryClient, API_BASE } from "@/lib/queryClient";
+import { getToken } from "@/lib/auth";
 import { useToast } from "@/hooks/use-toast";
 import { useState, useEffect } from "react";
 import { Button } from "@/components/ui/button";
@@ -341,7 +342,10 @@ export default function Questions() {
       if (statusFilter !== "all") params.set("status", statusFilter);
       const qs = params.toString();
       const url = `${API_BASE}/api/questions${qs ? "?" + qs : ""}`;
-      const r = await fetch(url);
+      const token = getToken();
+      const r = await fetch(url, {
+        headers: token ? { Authorization: `Bearer ${token}` } : {},
+      });
       return r.json();
     },
     staleTime: 10_000,
@@ -371,7 +375,7 @@ export default function Questions() {
         <div>
           <h1 className="text-xl font-bold">Вопросы</h1>
           <p className="text-sm text-muted-foreground mt-0.5">
-            {questions?.length ?? 0} {getCountLabel(questions?.length ?? 0)}
+            {Array.isArray(questions) ? questions.length : 0} {getCountLabel(Array.isArray(questions) ? questions.length : 0)}
           </p>
         </div>
         <Button
@@ -406,14 +410,14 @@ export default function Questions() {
         <div className="space-y-3">
           {[1, 2, 3].map((i) => <Skeleton key={i} className="h-40 w-full rounded-lg" />)}
         </div>
-      ) : questions?.length === 0 ? (
+      ) : !Array.isArray(questions) || questions.length === 0 ? (
         <div className="text-center py-12 text-muted-foreground">
           <HelpCircle size={32} className="mx-auto mb-3 opacity-30" />
           <p className="text-sm">Нет вопросов с выбранными фильтрами</p>
           <p className="text-xs mt-1">Нажмите «Синхронизировать» чтобы загрузить вопросы из Ozon</p>
         </div>
       ) : (
-        questions?.map((q) => <QuestionCard key={q.id} question={q} />)
+        questions.map((q) => <QuestionCard key={q.id} question={q} />)
       )}
 
       {/* Scroll to top button */}
