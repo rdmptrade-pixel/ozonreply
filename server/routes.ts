@@ -1261,7 +1261,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
   });
 
   // POST /api/questions/sync — синхронизация вопросов с Ozon
-  app.post("/api/questions/sync", requireAuth, async (_req, res) => {
+  app.post("/api/questions/sync", requireAuth, async (req, res) => {
     try {
       const settings = await storage.getSettings();
       const questionApiKey = settings?.questionApiKey || settings?.ozonApiKey;
@@ -1270,12 +1270,15 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
         return;
       }
 
+      // Optional limit: how many new questions to fetch at most (0 = unlimited)
+      const maxNew: number = typeof req.body?.limit === "number" ? req.body.limit : 0;
+
       let synced = 0;
       let skipped = 0;
       let lastId: string | undefined;
       const MAX_PAGES = 100;
 
-      for (let page = 0; page < MAX_PAGES; page++) {
+      outer: for (let page = 0; page < MAX_PAGES; page++) {
         const result = await fetchOzonQuestions(settings.ozonClientId, questionApiKey, lastId);
         if (!result.questions.length) break;
 
@@ -1296,6 +1299,9 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
             autoPublished: false,
           });
           synced++;
+
+          // Stop if limit reached
+          if (maxNew > 0 && synced >= maxNew) break outer;
         }
 
         if (!result.hasNext || !result.lastId) break;

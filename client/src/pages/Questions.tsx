@@ -353,12 +353,14 @@ export default function Questions() {
   });
 
   const [syncing, setSyncing] = useState(false);
+  const [fetchLimit, setFetchLimit] = useState("100");
   const { toast } = useToast();
 
   const handleSync = async () => {
     setSyncing(true);
     try {
-      const res = await apiRequest("POST", "/api/questions/sync");
+      const limitVal = fetchLimit === "0" ? 0 : parseInt(fetchLimit, 10);
+      const res = await apiRequest("POST", "/api/questions/sync", { limit: limitVal });
       const data = await res.json();
       toast({ title: `Синхронизация завершена: ${data.synced} новых вопросов` });
       await refetch();
@@ -378,17 +380,31 @@ export default function Questions() {
             {Array.isArray(questions) ? questions.length : 0} {getCountLabel(Array.isArray(questions) ? questions.length : 0)}
           </p>
         </div>
-        <Button
-          size="sm"
-          variant="outline"
-          onClick={handleSync}
-          disabled={isLoading || syncing}
-          className="h-8 text-xs shrink-0"
-          data-testid="btn-sync-questions"
-        >
-          <RefreshCw size={13} className={(isLoading || syncing) ? "animate-spin mr-1" : "mr-1"} />
-          Синхронизировать
-        </Button>
+        <div className="flex items-center gap-2 shrink-0">
+          <Button
+            size="sm"
+            variant="outline"
+            onClick={handleSync}
+            disabled={isLoading || syncing}
+            className="h-8 text-xs"
+            data-testid="btn-sync-questions"
+          >
+            <RefreshCw size={13} className={(isLoading || syncing) ? "animate-spin mr-1" : "mr-1"} />
+            Синхронизировать
+          </Button>
+          <Select value={fetchLimit} onValueChange={setFetchLimit} disabled={syncing}>
+            <SelectTrigger className="h-8 w-20 text-xs" data-testid="select-q-limit">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="50">50</SelectItem>
+              <SelectItem value="100">100</SelectItem>
+              <SelectItem value="500">500</SelectItem>
+              <SelectItem value="1000">1 000</SelectItem>
+              <SelectItem value="0">Все</SelectItem>
+            </SelectContent>
+          </Select>
+        </div>
       </div>
 
       {/* Filters */}
