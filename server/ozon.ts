@@ -446,10 +446,11 @@ interface OzonQuestionItem {
 }
 
 interface OzonQuestionsResponse {
-  // POST /v1/question/list format
+  // POST /v1/question/list format — returns { questions, last_id }
+  // Pagination: keep fetching while last_id changes and questions.length == limit
   questions?: OzonQuestionItem[];
-  has_next?: boolean;
   last_id?: string;
+  has_next?: boolean; // may not be present
   total?: number;
   // Legacy/fallback formats
   result?: {
@@ -473,8 +474,8 @@ export async function fetchOzonQuestions(
   const body: Record<string, unknown> = {
     limit: 100,
     sort_dir: "DESC",
-    // No filter = get all questions (answered and unanswered)
   };
+  // Ozon pagination: pass last_id from previous response to get next page
   if (lastId) body.last_id = lastId;
 
   const response = await fetch("https://api-seller.ozon.ru/v1/question/list", {
@@ -499,27 +500,25 @@ export async function fetchOzonQuestions(
   const data = await response.json() as OzonQuestionsResponse;
 
   const rawItems = data.questions ?? data.result?.questions ?? data.items ?? [];
-  const hasNext = data.has_next ?? data.result?.has_next ?? false;
   const nextLastId = data.last_id ?? data.result?.last_id ?? "";
-  const total = (data as any).total ?? (data as any).result?.total ?? null;
-  console.log(`[ozon/questions] items=${rawItems.length} has_next=${hasNext} last_id=${nextLastId} total=${total}`);
-  if (rawItems.length > 0) {
-    console.log("[ozon/questions] First item keys:", Object.keys(rawItems[0]));
-    console.log("[ozon/questions] First item:", JSON.stringify(rawItems[0]).slice(0, 300));
-  }
+  // Ozon paginates via last_id — has_next may be absent, use last_id presence as signal
+  const hasNext = rawItems.length > 0 && nextLastId !== "" && nextLastId !== lastId;
+  console.log(`[ozon/questions] items=${rawItems.length} hasNext=${hasNext} last_id=${nextLastId}`);
 
   const normalized: OzonQuestion[] = rawItems.map((item) => {
-    // Normalize ID: try all known field names
-    const qId = item.question_id ?? item.id ?? item.uuid ?? "";
+    // Real Ozon API fields (confirmed from debug): id, text, author_name, sku, published_at, status
+    const qId = item.id ?? item.question_id ?? item.uuid ?? "";
     const qText = item.text ?? item.body ?? item.content ?? "";
-    const qDate = item.created_at ?? item.date ?? new Date().toISOString();
-    const authorName = item.author?.name ?? item.author_name ?? "";
+    const qDate = item.published_at ?? item.created_at ?? item.date ?? new Date().toISOString();
+    const authorName = item.author_name ?? item.author?.name ?? "";
     const sku = item.sku ?? item.product?.sku ?? 0;
     const productId = String(item.product?.id ?? item.product_id ?? sku ?? "");
-    const productName = item.product?.name ?? "";
+    const productName = item.product?.name ?? (item as any).product_url ?? "";
+    const isAnswered = item.status === "ANSWERED" || item.is_answered === true
+      || ((item as any).answers_count ?? 0) > 0;
 
     if (!qId) {
-      console.warn("[ozon/questions] Item has no question_id, keys:", Object.keys(item));
+      console.warn("[ozon/questions] Item has no id, keys:", Object.keys(item));
     }
 
     return {
@@ -530,7 +529,7 @@ export async function fetchOzonQuestions(
       author_name: authorName,
       created_at: qDate,
       question_text: qText,
-      is_answered: item.is_answered ?? false,
+      is_answered: isAnswered,
     };
   }).filter(q => q.question_id); // skip items without ID
 
