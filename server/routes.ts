@@ -1245,6 +1245,24 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
   // Q&A: Вопросы покупателей
   // ────────────────────────────────────────────────────────────────────────────
 
+  // GET /api/questions/debug-ozon — raw Ozon API response (temp diagnostic, no auth)
+  app.get("/api/questions/debug-ozon", async (_req, res) => {
+    try {
+      const settings = await storage.getSettings();
+      const questionApiKey = settings?.questionApiKey || settings?.ozonApiKey;
+      if (!settings?.ozonClientId || !questionApiKey) {
+        res.json({ error: "no keys" }); return;
+      }
+      const response = await fetch("https://api-seller.ozon.ru/v1/question/list", {
+        method: "POST",
+        headers: { "Client-Id": settings.ozonClientId, "Api-Key": questionApiKey, "Content-Type": "application/json" },
+        body: JSON.stringify({ limit: 10, sort_dir: "DESC" }),
+      });
+      const raw = await response.json();
+      res.json({ status: response.status, keys: Object.keys(raw), data: raw });
+    } catch(e) { res.json({ error: String(e) }); }
+  });
+
   // GET /api/questions — список вопросов с фильтрами
   app.get("/api/questions", requireAuth, async (req, res) => {
     try {
