@@ -1264,8 +1264,9 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
   app.post("/api/questions/sync", requireAuth, async (_req, res) => {
     try {
       const settings = await storage.getSettings();
-      if (!settings?.ozonClientId || !settings?.ozonApiKey) {
-        res.status(400).json({ error: "Не настроены ключи Ozon API" });
+      const questionApiKey = settings?.questionApiKey || settings?.ozonApiKey;
+      if (!settings?.ozonClientId || !questionApiKey) {
+        res.status(400).json({ error: "Не настроен API ключ для вопросов. Добавьте Question API Key в настройках." });
         return;
       }
 
@@ -1275,7 +1276,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       const MAX_PAGES = 100;
 
       for (let page = 0; page < MAX_PAGES; page++) {
-        const result = await fetchOzonQuestions(settings.ozonClientId, settings.ozonApiKey, lastId);
+        const result = await fetchOzonQuestions(settings.ozonClientId, questionApiKey, lastId);
         if (!result.questions.length) break;
 
         for (const q of result.questions) {
@@ -1423,14 +1424,15 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       }
 
       const settings = await storage.getSettings();
-      if (!settings?.ozonClientId || !settings?.ozonApiKey) {
-        res.status(400).json({ error: "Не настроены ключи Ozon API" });
+      const questionApiKey = settings?.questionApiKey || settings?.ozonApiKey;
+      if (!settings?.ozonClientId || !questionApiKey) {
+        res.status(400).json({ error: "Не настроен API ключ для вопросов. Добавьте Question API Key в настройках." });
         return;
       }
 
       await postOzonQuestionAnswer(
         settings.ozonClientId,
-        settings.ozonApiKey,
+        questionApiKey,
         question.ozonQuestionId,
         resp.responseText
       );

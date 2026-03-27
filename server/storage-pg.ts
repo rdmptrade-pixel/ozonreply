@@ -72,6 +72,7 @@ export async function initPgDatabase(): Promise<void> {
       id INTEGER PRIMARY KEY DEFAULT 1,
       ozon_client_id TEXT NOT NULL DEFAULT '',
       ozon_api_key TEXT NOT NULL DEFAULT '',
+      question_api_key TEXT NOT NULL DEFAULT '',
       openai_api_key TEXT NOT NULL DEFAULT '',
       deepseek_api_key TEXT NOT NULL DEFAULT '',
       perplexity_api_key TEXT NOT NULL DEFAULT '',
@@ -218,10 +219,12 @@ export async function deleteUserPg(id: number): Promise<void> {
 export class PgStorage {
 
   async getSettings(): Promise<any> {
-    // First check ENV overrides (takes priority over DB)
-    // Attempt to add question_template column if it doesn't exist yet (migration)
+    // Self-healing migration for older DBs
     try {
       await pool.query("ALTER TABLE settings ADD COLUMN IF NOT EXISTS question_template TEXT NOT NULL DEFAULT ''");
+    } catch {}
+    try {
+      await pool.query("ALTER TABLE settings ADD COLUMN IF NOT EXISTS question_api_key TEXT NOT NULL DEFAULT ''");
     } catch {}
 
     const envSettings = this._getEnvSettings();
@@ -234,6 +237,7 @@ export class PgStorage {
       id: 1,
       ozonClientId: row.ozon_client_id,
       ozonApiKey: row.ozon_api_key,
+      questionApiKey: row.question_api_key ?? "",
       openaiApiKey: row.openai_api_key,
       deepseekApiKey: row.deepseek_api_key,
       perplexityApiKey: row.perplexity_api_key,
@@ -255,6 +259,7 @@ export class PgStorage {
       id: 1,
       ozonClientId: clientId,
       ozonApiKey: apiKey,
+      questionApiKey: process.env.QUESTION_API_KEY ?? "",
       openaiApiKey: process.env.OPENAI_API_KEY ?? "",
       deepseekApiKey: process.env.DEEPSEEK_API_KEY ?? "",
       perplexityApiKey: process.env.PERPLEXITY_API_KEY ?? "",
@@ -268,19 +273,23 @@ export class PgStorage {
   }
 
   async upsertSettings(data: any): Promise<any> {
-    // Ensure column exists (migration for older DBs)
+    // Ensure columns exist (migration for older DBs)
     try {
       await pool.query("ALTER TABLE settings ADD COLUMN IF NOT EXISTS question_template TEXT NOT NULL DEFAULT ''");
     } catch {}
+    try {
+      await pool.query("ALTER TABLE settings ADD COLUMN IF NOT EXISTS question_api_key TEXT NOT NULL DEFAULT ''");
+    } catch {}
 
     await pool.query(`
-      INSERT INTO settings (id, ozon_client_id, ozon_api_key, openai_api_key, deepseek_api_key,
-        perplexity_api_key, ai_provider, google_sheets_id, response_template, question_template,
-        auto_publish, sync_interval)
-      VALUES (1, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+      INSERT INTO settings (id, ozon_client_id, ozon_api_key, question_api_key, openai_api_key,
+        deepseek_api_key, perplexity_api_key, ai_provider, google_sheets_id, response_template,
+        question_template, auto_publish, sync_interval)
+      VALUES (1, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
       ON CONFLICT (id) DO UPDATE SET
         ozon_client_id = EXCLUDED.ozon_client_id,
         ozon_api_key = EXCLUDED.ozon_api_key,
+        question_api_key = EXCLUDED.question_api_key,
         openai_api_key = EXCLUDED.openai_api_key,
         deepseek_api_key = EXCLUDED.deepseek_api_key,
         perplexity_api_key = EXCLUDED.perplexity_api_key,
@@ -291,8 +300,8 @@ export class PgStorage {
         auto_publish = EXCLUDED.auto_publish,
         sync_interval = EXCLUDED.sync_interval
     `, [
-      data.ozonClientId, data.ozonApiKey, data.openaiApiKey ?? "",
-      data.deepseekApiKey ?? "", data.perplexityApiKey ?? "",
+      data.ozonClientId, data.ozonApiKey, data.questionApiKey ?? "",
+      data.openaiApiKey ?? "", data.deepseekApiKey ?? "", data.perplexityApiKey ?? "",
       data.aiProvider ?? "deepseek", data.googleSheetsId ?? "",
       data.responseTemplate ?? "", data.questionTemplate ?? "",
       data.autoPublish ?? false, data.syncInterval ?? 30,

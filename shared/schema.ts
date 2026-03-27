@@ -98,6 +98,7 @@ export type QuestionWithResponse = Question & {
 export interface InsertSettings {
   ozonClientId: string;
   ozonApiKey: string;
+  questionApiKey: string;
   openaiApiKey: string;
   deepseekApiKey: string;
   perplexityApiKey: string;

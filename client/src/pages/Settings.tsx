@@ -110,6 +110,7 @@ export default function Settings() {
   const [form, setForm] = useState<Omit<Settings, "id">>({
     ozonClientId: "",
     ozonApiKey: "",
+    questionApiKey: "",
     openaiApiKey: "",
     deepseekApiKey: "",
     perplexityApiKey: "",
@@ -126,6 +127,7 @@ export default function Settings() {
       setForm({
         ozonClientId: saved.ozonClientId ?? "",
         ozonApiKey: saved.ozonApiKey ?? "",
+        questionApiKey: saved.questionApiKey ?? "",
         openaiApiKey: saved.openaiApiKey ?? "",
         deepseekApiKey: saved.deepseekApiKey ?? "",
         perplexityApiKey: saved.perplexityApiKey ?? "",
@@ -369,22 +371,39 @@ export default function Settings() {
           </CardContent>
         </Card>
 
-        {/* Q&A Template */}
+        {/* Q&A Settings */}
         <Card>
           <CardHeader className="pb-3">
             <CardTitle className="text-base">Настройки Q&amp;A</CardTitle>
             <CardDescription className="text-xs">
-              Шаблон для ответов на вопросы покупателей. Если не задан — используется стандартный промт.
+              Отдельный API ключ Ozon для работы с вопросами покупателей (роль: Question + Answer).
             </CardDescription>
           </CardHeader>
-          <CardContent>
-            <Textarea
-              value={form.questionTemplate}
-              onChange={(e) => set("questionTemplate", e.target.value)}
-              placeholder={`Например: Отвечай официально и технически точно. Упоминай магазин «ТехноМаркет». Если вопрос о совместимости — уточни модель устройства покупателя.`}
-              className="min-h-[100px] text-sm"
-              data-testid="input-question-template"
-            />
+          <CardContent className="space-y-4">
+            <div className="space-y-1.5">
+              <label className="text-xs font-medium text-muted-foreground">Question API Key</label>
+              <Input
+                type="password"
+                value={form.questionApiKey}
+                onChange={(e) => set("questionApiKey", e.target.value)}
+                placeholder="Ozon API ключ с правами на вопросы"
+                data-testid="input-question-api-key"
+              />
+              <p className="text-xs text-muted-foreground">
+                Создайте отдельный ключ в Ozon Seller с ролями <strong>Question read only</strong> и <strong>Question Answer</strong>.
+                Если не задан — используется основной API Key.
+              </p>
+            </div>
+            <div className="space-y-1.5">
+              <label className="text-xs font-medium text-muted-foreground">Шаблон ответов на вопросы</label>
+              <Textarea
+                value={form.questionTemplate}
+                onChange={(e) => set("questionTemplate", e.target.value)}
+                placeholder={`Например: Отвечай официально и технически точно. Упоминай магазин «ТехноМаркет». Если вопрос о совместимости — уточни модель устройства покупателя.`}
+                className="min-h-[100px] text-sm"
+                data-testid="input-question-template"
+              />
+            </div>
           </CardContent>
         </Card>
 
