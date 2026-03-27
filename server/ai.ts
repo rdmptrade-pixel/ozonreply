@@ -167,16 +167,17 @@ export { PROVIDER_CONFIG };
 interface GenerateQuestionAnswerParams {
   questionText: string;
   productName: string;
-  productDescription?: string;   // из product_cache
-  productAttributes?: string;    // из product_cache
-  knowledgeBase?: Array<{ question: string; answer: string }>; // похожие Q&A по SKU
+  productDescription?: string;
+  productAttributes?: string;
+  knowledgeBase?: Array<{ question: string; answer: string }>;
+  similarProducts?: Array<{ name: string; attributes: string; ozonSku: string }>;
   template?: string;
   apiKey: string;
   provider: AiProvider;
 }
 
 export async function generateQuestionAnswer(params: GenerateQuestionAnswerParams): Promise<string> {
-  const { questionText, productName, productDescription, productAttributes, knowledgeBase, template, apiKey, provider } = params;
+  const { questionText, productName, productDescription, productAttributes, knowledgeBase, similarProducts, template, apiKey, provider } = params;
 
   const config = PROVIDER_CONFIG[provider];
 
@@ -201,9 +202,18 @@ export async function generateQuestionAnswer(params: GenerateQuestionAnswerParam
 
   const systemPrompt = baseInstructions;
 
+  // Build similar products block for recommendations
+  let similarCtx = "";
+  if (similarProducts && similarProducts.length > 0) {
+    const list = similarProducts
+      .map(p => `- ${p.name}${p.attributes ? ` (${p.attributes.slice(0, 80)})` : ""}`)
+      .join("\n");
+    similarCtx = `\n\nДругие товары нашего магазина (можешь рекомендовать если подходящее):\n${list}`;
+  }
+
   const productBlock = productCtx.length
-    ? `\nДанные товара:\n${productCtx.join("\n")}${knowledgeCtx}`
-    : knowledgeCtx;
+    ? `\nДанные товара:\n${productCtx.join("\n")}${knowledgeCtx}${similarCtx}`
+    : `${knowledgeCtx}${similarCtx}`;
 
   const userPrompt = `Товар: ${productName || "(не указан)"}${productBlock}
 

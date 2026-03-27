@@ -25,7 +25,7 @@ function markPublishedId(ozonReviewId: string): void {
   _sqliteMarkId(ozonReviewId);
 }
 
-import { fetchOzonReviewsStreaming, postOzonResponse, testOzonCredentials, parseOzonCsvReviews, OzonPremiumPlusError, fetchOzonQuestions, postOzonQuestionAnswer, fetchOzonQuestionAnswers, fetchOzonProductInfo } from "./ozon";
+import { fetchOzonReviewsStreaming, postOzonResponse, testOzonCredentials, parseOzonCsvReviews, OzonPremiumPlusError, fetchOzonQuestions, postOzonQuestionAnswer, fetchOzonQuestionAnswers, fetchOzonProductInfo, fetchAllOzonProductIds, fetchOzonProductInfoByOfferIds } from "./ozon";
 import { Pool } from "pg";
 const pool = new Pool({ connectionString: process.env.PG_CONNECTION_STRING, ssl: { rejectUnauthorized: false } });
 import { generateAiResponse, generateQuestionAnswer, type AiProvider } from "./ai";
@@ -1431,6 +1431,68 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     }
   });
 
+  // POST /api/products/sync-catalog — загрузить весь ассортимент магазина из Ozon
+  app.post("/api/products/sync-catalog", requireAuth, async (_req, res) => {
+    try {
+      const settings = await storage.getSettings();
+      const productApiKey = (settings as any)?.productApiKey || settings?.ozonApiKey;
+      if (!settings?.ozonClientId || !productApiKey) {
+        res.status(400).json({ error: "Не настроен Product API Key. Добавьте ключ с ролью Admin read only." });
+        return;
+      }
+
+      // 1. Получаем все offer_id товаров магазина
+      console.log("[sync-catalog] Fetching all product IDs...");
+      const offerIds = await fetchAllOzonProductIds(settings.ozonClientId, productApiKey);
+      console.log(`[sync-catalog] Total products: ${offerIds.length}`);
+
+      if (!offerIds.length) {
+        res.json({ synced: 0, total: 0 });
+        return;
+      }
+
+      // 2. Загружаем инфо батчами по 100
+      const BATCH = 100;
+      let synced = 0;
+      let errors = 0;
+
+      for (let i = 0; i < offerIds.length; i += BATCH) {
+        const batch = offerIds.slice(i, i + BATCH);
+        try {
+          const products = await fetchOzonProductInfoByOfferIds(settings.ozonClientId, productApiKey, batch);
+          for (const p of products) {
+            if (!p.name) continue;
+            await (storage as any).upsertProductCache({
+              ozonSku: p.sku || (p as any).offerId || String(i + synced),
+              productId: p.productId,
+              offerId: (p as any).offerId ?? "",
+              name: p.name,
+              description: p.description || "",
+              attributes: p.attributes || "",
+              category: (p as any).category || "",
+            });
+            // Обновить product_name в вопросах если SKU совпадает
+            if (p.sku) {
+              try {
+                await pool.query("UPDATE questions SET product_name=$1 WHERE ozon_sku=$2", [p.name, p.sku]);
+              } catch {}
+            }
+            synced++;
+          }
+          console.log(`[sync-catalog] Batch ${i}-${i+BATCH}: saved ${products.length}`);
+        } catch (e) {
+          console.error(`[sync-catalog] batch ${i} error:`, e);
+          errors++;
+        }
+      }
+
+      res.json({ synced, total: offerIds.length, errors });
+    } catch (e) {
+      console.error("[sync-catalog]", e);
+      res.status(500).json({ error: String(e) });
+    }
+  });
+
   // POST /api/questions/:id/generate — сгенерировать ответ AI
   app.post("/api/questions/:id/generate", requireAuth, async (req, res) => {
     const id = parseInt(req.params.id, 10);
@@ -1454,6 +1516,11 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
         ? await (storage as any).getKnowledgeBySku?.(question.ozonSku, 5).catch(() => [])
         : [];
 
+      // Load similar products for recommendations
+      const similarProducts = (productCache?.name || question.productName)
+        ? await (storage as any).getSimilarProducts?.(question.ozonSku ?? "", productCache?.name || question.productName, 5).catch(() => [])
+        : [];
+
       let aiText: string;
       try {
         aiText = await generateQuestionAnswer({
@@ -1462,6 +1529,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
           productDescription: productCache?.description || undefined,
           productAttributes: productCache?.attributes || undefined,
           knowledgeBase: knowledgeBase?.length ? knowledgeBase : undefined,
+          similarProducts: similarProducts?.length ? similarProducts : undefined,
           template: (settings as any)?.questionTemplate || undefined,
           apiKey,
           provider,

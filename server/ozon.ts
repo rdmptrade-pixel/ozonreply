@@ -720,3 +720,105 @@ export async function fetchOzonQuestionAnswers(
     createdAt: a.created_at ?? new Date().toISOString(),
   }));
 }
+
+/**
+ * Fetch ALL product offer_ids from the seller's catalog: POST /v2/product/list
+ * Returns offer_id list for use in product info requests.
+ */
+export async function fetchAllOzonProductIds(
+  clientId: string,
+  apiKey: string,
+): Promise<string[]> {
+  const offerIds: string[] = [];
+  let lastId = "";
+  const LIMIT = 1000;
+
+  while (true) {
+    const body: any = {
+      filter: { visibility: "ALL" },
+      limit: LIMIT,
+    };
+    if (lastId) body.last_id = lastId;
+
+    const response = await fetch("https://api-seller.ozon.ru/v2/product/list", {
+      method: "POST",
+      headers: {
+        "Client-Id": clientId,
+        "Api-Key": apiKey,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(body),
+    });
+
+    if (!response.ok) {
+      const text = await response.text();
+      throw new Error(`Ozon Product List API error ${response.status}: ${text}`);
+    }
+
+    const data = await response.json() as any;
+    const items = data.result?.items ?? data.items ?? [];
+    console.log(`[ozon/product-list] page last_id=${lastId || "start"}: ${items.length} items, total=${data.result?.total ?? "?"}`);
+
+    for (const item of items) {
+      if (item.offer_id) offerIds.push(item.offer_id);
+    }
+
+    const hasMore = data.result?.last_id && data.result.last_id !== lastId && items.length === LIMIT;
+    if (!hasMore) break;
+    lastId = data.result.last_id;
+  }
+
+  return offerIds;
+}
+
+/**
+ * Fetch product info by offer_id list: POST /v3/product/info/list
+ * Uses offer_id instead of sku — works with Admin read only key.
+ */
+export async function fetchOzonProductInfoByOfferIds(
+  clientId: string,
+  apiKey: string,
+  offerIds: string[]
+): Promise<OzonProductInfo[]> {
+  if (!offerIds.length) return [];
+
+  const response = await fetch("https://api-seller.ozon.ru/v3/product/info/list", {
+    method: "POST",
+    headers: {
+      "Client-Id": clientId,
+      "Api-Key": apiKey,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ offer_id: offerIds, product_id: [], sku: [] }),
+  });
+
+  if (!response.ok) {
+    const text = await response.text();
+    throw new Error(`Ozon Product Info API error ${response.status}: ${text}`);
+  }
+
+  const data = await response.json() as any;
+  const items = data.result?.items ?? data.items ?? [];
+
+  return items.map((item: any) => {
+    // Extract named attributes as key:value pairs
+    const attrPairs: string[] = [];
+    for (const attr of item.attributes ?? []) {
+      const name = attr.name ?? "";
+      const val = attr.values?.[0]?.value ?? "";
+      if (name && val) attrPairs.push(`${name}: ${val}`);
+    }
+
+    return {
+      sku: String(item.sku ?? ""),
+      productId: String(item.id ?? item.product_id ?? ""),
+      offerId: item.offer_id ?? "",
+      name: item.name ?? "",
+      description: (item.description ?? "").slice(0, 1000),
+      fullDescription: item.description ?? "",
+      attributes: attrPairs.slice(0, 30).join("; "),
+      category: item.category_id ? String(item.category_id) : "",
+      barcodes: (item.barcodes ?? []).join(", "),
+    } as any;
+  });
+}

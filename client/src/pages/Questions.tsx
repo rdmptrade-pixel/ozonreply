@@ -342,9 +342,9 @@ export default function Questions() {
   const handleSyncProducts = async () => {
     setSyncingProducts(true);
     try {
-      const res = await apiRequest("POST", "/api/products/sync-info");
+      const res = await apiRequest("POST", "/api/products/sync-catalog");
       const data = await res.json();
-      toast({ title: `Описания загружены: ${data.synced} из ${data.total} товаров` });
+      toast({ title: `Ассортимент загружен: ${data.synced} из ${data.total} товаров` });
     } catch (e: any) {
       toast({ title: "Ошибка", description: e.message, variant: "destructive" });
     }
@@ -413,9 +413,9 @@ export default function Questions() {
           data-testid="btn-sync-products"
         >
           <RefreshCw size={11} className={syncingProducts ? "animate-spin mr-1" : "mr-1"} />
-          {syncingProducts ? "Загрузка описаний..." : "Загрузить описания товаров"}
+          {syncingProducts ? "Загрузка ассортимента..." : "Загрузить ассортимент"}
         </Button>
-        <span className="text-xs text-muted-foreground">— для улучшения генерации ответов</span>
+        <span className="text-xs text-muted-foreground">— названия, описания и рекомендации для AI</span>
       </div>
 
       {/* Filters */}

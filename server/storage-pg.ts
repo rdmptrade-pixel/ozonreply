@@ -137,12 +137,15 @@ export async function initPgDatabase(): Promise<void> {
       id SERIAL PRIMARY KEY,
       ozon_sku TEXT NOT NULL UNIQUE,
       product_id TEXT NOT NULL DEFAULT '',
+      offer_id TEXT NOT NULL DEFAULT '',
       name TEXT NOT NULL DEFAULT '',
       description TEXT NOT NULL DEFAULT '',
       attributes TEXT NOT NULL DEFAULT '',
+      category TEXT NOT NULL DEFAULT '',
       updated_at TEXT NOT NULL DEFAULT ''
     );
     CREATE INDEX IF NOT EXISTS idx_product_cache_sku ON product_cache(ozon_sku);
+    CREATE INDEX IF NOT EXISTS idx_product_cache_offer ON product_cache(offer_id);
   `);
 
   // Seed settings from ENV on first run (if table is empty)
@@ -757,32 +760,71 @@ export class PgStorage {
   async upsertProductCache(data: {
     ozonSku: string;
     productId: string;
+    offerId?: string;
     name: string;
     description: string;
     attributes: string;
+    category?: string;
   }): Promise<void> {
+    // Self-healing migration
+    try { await pool.query("ALTER TABLE product_cache ADD COLUMN IF NOT EXISTS offer_id TEXT NOT NULL DEFAULT ''"); } catch {}
+    try { await pool.query("ALTER TABLE product_cache ADD COLUMN IF NOT EXISTS category TEXT NOT NULL DEFAULT ''"); } catch {}
     await pool.query(`
-      INSERT INTO product_cache (ozon_sku, product_id, name, description, attributes, updated_at)
-      VALUES ($1, $2, $3, $4, $5, $6)
+      INSERT INTO product_cache (ozon_sku, product_id, offer_id, name, description, attributes, category, updated_at)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
       ON CONFLICT (ozon_sku) DO UPDATE SET
         product_id = EXCLUDED.product_id,
+        offer_id = EXCLUDED.offer_id,
         name = EXCLUDED.name,
         description = EXCLUDED.description,
         attributes = EXCLUDED.attributes,
+        category = EXCLUDED.category,
         updated_at = EXCLUDED.updated_at
-    `, [data.ozonSku, data.productId, data.name, data.description, data.attributes, nowStr()]);
+    `, [data.ozonSku, data.productId, data.offerId ?? "", data.name,
+        data.description, data.attributes, data.category ?? "", nowStr()]);
   }
 
   async getProductCache(ozonSku: string): Promise<any | null> {
     const r = await pool.query("SELECT * FROM product_cache WHERE ozon_sku = $1", [ozonSku]);
     if (!r.rowCount) return null;
     const row = r.rows[0];
-    return { ozonSku: row.ozon_sku, productId: row.product_id, name: row.name, description: row.description, attributes: row.attributes, updatedAt: row.updated_at };
+    return { ozonSku: row.ozon_sku, productId: row.product_id, offerId: row.offer_id, name: row.name, description: row.description, attributes: row.attributes, category: row.category, updatedAt: row.updated_at };
   }
 
   async getAllProductCacheSkus(): Promise<string[]> {
     const r = await pool.query("SELECT ozon_sku FROM product_cache");
     return r.rows.map((row: any) => row.ozon_sku);
+  }
+
+  /**
+   * Find similar products in the catalog for AI recommendations.
+   * Returns up to `limit` products with similar name keywords or same category.
+   */
+  async getSimilarProducts(currentSku: string, productName: string, limit = 5): Promise<any[]> {
+    // Extract key words from product name (skip short words)
+    const keywords = productName
+      .split(/\s+/)
+      .filter(w => w.length > 3)
+      .slice(0, 4);
+
+    if (!keywords.length) return [];
+
+    // Search by keyword similarity in name
+    const conditions = keywords.map((_, i) => `name ILIKE $${i + 2}`).join(" OR ");
+    const params: any[] = [currentSku, ...keywords.map(k => `%${k}%`)];
+    const r = await pool.query(`
+      SELECT ozon_sku, name, attributes, offer_id
+      FROM product_cache
+      WHERE ozon_sku != $1 AND (${conditions})
+      ORDER BY updated_at DESC
+      LIMIT ${limit}
+    `, params);
+    return r.rows.map(row => ({
+      ozonSku: row.ozon_sku,
+      name: row.name,
+      attributes: row.attributes,
+      offerId: row.offer_id,
+    }));
   }
 
   /**
