@@ -513,7 +513,18 @@ export async function fetchOzonQuestions(
     const authorName = item.author_name ?? item.author?.name ?? "";
     const sku = item.sku ?? item.product?.sku ?? 0;
     const productId = String(item.product?.id ?? item.product_id ?? sku ?? "");
-    const productName = item.product?.name ?? (item as any).product_url ?? "";
+    // Extract readable name: prefer product.name, fallback to slug from URL
+    let productName = item.product?.name ?? "";
+    if (!productName && (item as any).product_url) {
+      // Extract slug from URL: /product/SLUG-SKU/ -> "SLUG" humanized
+      const match = String((item as any).product_url).match(/\/product\/([^/]+)/);
+      if (match) {
+        productName = match[1]
+          .replace(/-\d+\/?$/, "")   // remove trailing SKU number
+          .replace(/-/g, " ")          // dashes to spaces
+          .replace(/\b\w/g, c => c.toUpperCase()); // capitalize
+      }
+    }
     const isAnswered = item.status === "ANSWERED" || item.is_answered === true
       || ((item as any).answers_count ?? 0) > 0;
 
@@ -618,6 +629,7 @@ export async function fetchOzonProductInfo(
 ): Promise<OzonProductInfo[]> {
   if (!skus.length) return [];
 
+  // POST /v2/product/info/list accepts { sku: number[] }
   const response = await fetch("https://api-seller.ozon.ru/v2/product/info/list", {
     method: "POST",
     headers: {
@@ -630,19 +642,26 @@ export async function fetchOzonProductInfo(
 
   if (!response.ok) {
     const text = await response.text();
+    console.error(`[ozon/product-info] ${response.status}: ${text.slice(0, 200)}`);
     throw new Error(`Ozon Product Info API error ${response.status}: ${text}`);
   }
 
-  const data = await response.json() as { items?: any[]; result?: { items?: any[] } };
-  const items = data.items ?? data.result?.items ?? [];
+  const data = await response.json() as any;
+  console.log(`[ozon/product-info] response keys:`, Object.keys(data));
+
+  // v2 returns { result: { items: [...] } } or { items: [...] }
+  const items = data.result?.items ?? data.items ?? [];
+  console.log(`[ozon/product-info] items count:`, items.length);
+  if (items.length > 0) {
+    console.log(`[ozon/product-info] first item keys:`, Object.keys(items[0]).slice(0, 10));
+  }
 
   return items.map((item: any) => {
-    // Extract key attributes as short text
+    // Extract key attributes as readable text
     const attrs: string[] = [];
     for (const attr of item.attributes ?? []) {
-      const name = attr.attribute_id ? String(attr.attribute_id) : "";
       const val = attr.values?.[0]?.value ?? "";
-      if (name && val) attrs.push(`${val}`);
+      if (val) attrs.push(val);
     }
 
     return {

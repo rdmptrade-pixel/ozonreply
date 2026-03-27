@@ -1364,42 +1364,58 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
         return;
       }
 
-      // Collect unique SKUs from questions table
-      const skuRows = await pool.query(
-        "SELECT DISTINCT ozon_sku FROM questions WHERE ozon_sku != '' ORDER BY ozon_sku"
-      );
-      const allSkus = skuRows.rows.map((r: any) => r.ozon_sku).filter(Boolean);
+      // Collect unique SKUs directly via storage proxy (works for both PG and SQLite)
+      let allSkus: string[] = [];
+      try {
+        // Try PG direct query first
+        const skuRows = await pool.query(
+          "SELECT DISTINCT ozon_sku FROM questions WHERE ozon_sku != '' AND ozon_sku ~ '^[0-9]+$' ORDER BY ozon_sku"
+        );
+        allSkus = skuRows.rows.map((r: any) => r.ozon_sku).filter(Boolean);
+      } catch {
+        // Fallback: get from questions list
+        const qs = await (storage as any).getQuestions?.({}) ?? [];
+        const skuSet = new Set<string>();
+        for (const q of qs) { if (q.ozonSku && /^\d+$/.test(q.ozonSku)) skuSet.add(q.ozonSku); }
+        allSkus = [...skuSet];
+      }
 
       if (!allSkus.length) {
-        res.json({ synced: 0, message: "Нет SKU для загрузки — сначала синхронизируйте вопросы" });
+        res.json({ synced: 0, message: "Нет SKU — сначала синхронизируйте вопросы" });
         return;
       }
+
+      console.log(`[products/sync-info] Found ${allSkus.length} unique SKUs`);
 
       // Fetch in batches of 100 (Ozon API limit)
       const BATCH = 100;
       let synced = 0;
+      let errors = 0;
       for (let i = 0; i < allSkus.length; i += BATCH) {
-        const batch = allSkus.slice(i, i + BATCH).map(Number).filter(n => !isNaN(n));
+        const batchSkus = allSkus.slice(i, i + BATCH);
+        const batch = batchSkus.map(Number).filter(n => !isNaN(n) && n > 0);
         if (!batch.length) continue;
         try {
           const products = await fetchOzonProductInfo(settings.ozonClientId, settings.ozonApiKey, batch);
+          console.log(`[products/sync-info] Batch ${i}-${i+BATCH}: got ${products.length} products`);
           for (const p of products) {
             if (!p.sku) continue;
             await (storage as any).upsertProductCache({
               ozonSku: p.sku,
               productId: p.productId,
               name: p.name,
-              description: [p.description, p.attributes].filter(Boolean).join("\n"),
-              attributes: p.attributes,
+              description: p.description || "",
+              attributes: p.attributes || "",
             });
             synced++;
           }
         } catch (e) {
-          console.error(`[products/sync-info] batch error:`, e);
+          console.error(`[products/sync-info] batch ${i} error:`, e);
+          errors++;
         }
       }
 
-      res.json({ synced, total: allSkus.length });
+      res.json({ synced, total: allSkus.length, errors });
     } catch (e) {
       console.error("[products/sync-info]", e);
       res.status(500).json({ error: String(e) });
