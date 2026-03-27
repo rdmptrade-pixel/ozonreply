@@ -1315,6 +1315,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
             ozonQuestionId: q.question_id,
             productId: q.product_id,
             productName: q.product_name,
+            productUrl: q.product_url ?? "",
             ozonSku: String(q.sku),
             authorName: q.author_name,
             questionText: q.question_text,

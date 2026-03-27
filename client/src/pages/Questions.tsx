@@ -30,6 +30,7 @@ interface QuestionWithResponse {
   ozonQuestionId: string;
   productId: string;
   productName: string;
+  productUrl?: string;
   ozonSku?: string;
   authorName: string;
   questionText: string;
@@ -89,26 +90,6 @@ function QuestionCard({ question }: { question: QuestionWithResponse }) {
     onError: (e: Error) => toast({ title: "Ошибка генерации", description: e.message, variant: "destructive" }),
   });
 
-  const approveMutation = useMutation({
-    mutationFn: () => apiRequest("POST", `/api/questions/${question.id}/approve`),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["/api/questions"], exact: false });
-      queryClient.invalidateQueries({ queryKey: ["/api/stats"] });
-      toast({ title: "Ответ утверждён" });
-    },
-    onError: (e: Error) => toast({ title: "Ошибка", description: e.message, variant: "destructive" }),
-  });
-
-  const rejectMutation = useMutation({
-    mutationFn: () => apiRequest("POST", `/api/questions/${question.id}/reject`),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["/api/questions"], exact: false });
-      queryClient.invalidateQueries({ queryKey: ["/api/stats"] });
-      toast({ title: "Вопрос отклонён" });
-    },
-    onError: (e: Error) => toast({ title: "Ошибка", description: e.message, variant: "destructive" }),
-  });
-
   const publishMutation = useMutation({
     mutationFn: async () => {
       const res = await apiRequest("POST", `/api/questions/${question.id}/publish`);
@@ -163,7 +144,18 @@ function QuestionCard({ question }: { question: QuestionWithResponse }) {
           <div>
             <div className="flex items-center gap-2 flex-wrap">
               <HelpCircle size={14} className="text-primary shrink-0" />
-              <span className="font-semibold text-sm">{question.productName || "Товар"}</span>
+              {question.productUrl ? (
+                <a
+                  href={question.productUrl}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="font-semibold text-sm hover:underline text-primary"
+                >
+                  {question.productName || "Товар"}
+                </a>
+              ) : (
+                <span className="font-semibold text-sm">{question.productName || "Товар"}</span>
+              )}
             </div>
             <div className="flex items-center gap-3 mt-1 flex-wrap">
               <span className="text-xs text-muted-foreground">{question.authorName || "Покупатель"}</span>
@@ -262,16 +254,6 @@ function QuestionCard({ question }: { question: QuestionWithResponse }) {
           )}
           {(question.status === "pending_approval" || question.status === "approved") && (
             <div className="flex gap-2 w-full">
-              <Button
-                size="sm"
-                onClick={() => approveMutation.mutate()}
-                disabled={approveMutation.isPending}
-                className="flex-1 h-8 text-xs bg-green-600 hover:bg-green-700 text-white"
-                data-testid={`btn-approve-q-${question.id}`}
-              >
-                {approveMutation.isPending && <RefreshCw size={12} className="animate-spin mr-1" />}
-                Одобрить
-              </Button>
               <Button
                 size="sm"
                 onClick={() => publishMutation.mutate()}

@@ -420,6 +420,7 @@ export interface OzonQuestion {
   sku: number;
   product_id: string;
   product_name: string;
+  product_url: string;
   author_name: string;
   created_at: string;
   question_text: string;
@@ -532,11 +533,14 @@ export async function fetchOzonQuestions(
       console.warn("[ozon/questions] Item has no id, keys:", Object.keys(item));
     }
 
+    const productUrl = (item as any).product_url ?? (item as any).question_link ?? "";
+
     return {
       question_id: qId,
       sku,
       product_id: productId,
       product_name: productName,
+      product_url: productUrl,
       author_name: authorName,
       created_at: qDate,
       question_text: qText,

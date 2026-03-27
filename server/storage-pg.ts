@@ -89,6 +89,7 @@ export async function initPgDatabase(): Promise<void> {
       ozon_question_id TEXT NOT NULL UNIQUE,
       product_id TEXT NOT NULL DEFAULT '',
       product_name TEXT NOT NULL DEFAULT '',
+      product_url TEXT NOT NULL DEFAULT '',
       ozon_sku TEXT NOT NULL DEFAULT '',
       author_name TEXT NOT NULL DEFAULT '',
       question_text TEXT NOT NULL DEFAULT '',
@@ -573,6 +574,7 @@ export class PgStorage {
       ozonQuestionId: row.ozon_question_id,
       productId: row.product_id,
       productName: row.product_name,
+      productUrl: row.product_url ?? "",
       ozonSku: row.ozon_sku,
       authorName: row.author_name,
       questionText: row.question_text,
@@ -635,16 +637,18 @@ export class PgStorage {
   }
 
   async createQuestion(data: any): Promise<any> {
+    // Self-healing migration for older DBs
+    try { await pool.query("ALTER TABLE questions ADD COLUMN IF NOT EXISTS product_url TEXT NOT NULL DEFAULT ''"); } catch {}
     const ts = nowStr();
     const r = await pool.query(`
-      INSERT INTO questions (ozon_question_id, product_id, product_name, ozon_sku, author_name,
-        question_text, question_date, status, is_answered, auto_published, created_at, updated_at)
-      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+      INSERT INTO questions (ozon_question_id, product_id, product_name, product_url, ozon_sku,
+        author_name, question_text, question_date, status, is_answered, auto_published, created_at, updated_at)
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
       RETURNING *
     `, [
       data.ozonQuestionId, data.productId ?? "", data.productName ?? "",
-      data.ozonSku ?? "", data.authorName ?? "", data.questionText ?? "",
-      data.questionDate ?? ts, data.status ?? "new",
+      data.productUrl ?? "", data.ozonSku ?? "", data.authorName ?? "",
+      data.questionText ?? "", data.questionDate ?? ts, data.status ?? "new",
       Boolean(data.isAnswered), Boolean(data.autoPublished), ts, ts,
     ]);
     return this._rowToQuestion(r.rows[0]);
