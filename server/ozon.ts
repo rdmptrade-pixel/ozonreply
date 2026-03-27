@@ -426,36 +426,35 @@ export interface OzonQuestion {
   is_answered: boolean;
 }
 
+interface OzonQuestionItem {
+  question_id: string;
+  sku?: number;
+  product?: { id?: string; name?: string; sku?: number };
+  author?: { name?: string };
+  created_at?: string;
+  text?: string;
+  is_answered?: boolean;
+  status?: string;
+}
+
 interface OzonQuestionsResponse {
+  // POST /v1/question/list format
+  questions?: OzonQuestionItem[];
+  has_next?: boolean;
+  last_id?: string;
+  total?: number;
+  // Legacy/fallback formats
   result?: {
-    questions?: Array<{
-      question_id: string;
-      sku?: number;
-      product?: { id?: string; name?: string; sku?: number };
-      author?: { name?: string };
-      created_at?: string;
-      text?: string;
-      is_answered?: boolean;
-    }>;
+    questions?: OzonQuestionItem[];
     has_next?: boolean;
     last_id?: string;
     total?: number;
   };
-  items?: Array<{
-    question_id: string;
-    sku?: number;
-    product?: { id?: string; name?: string; sku?: number };
-    author?: { name?: string };
-    created_at?: string;
-    text?: string;
-    is_answered?: boolean;
-  }>;
-  has_next?: boolean;
-  last_id?: string;
+  items?: OzonQuestionItem[];
 }
 
 /**
- * Fetch questions from Ozon: GET /v1/product/questions/list
+ * Fetch questions from Ozon: POST /v1/question/list
  * Returns up to `limit` questions (max 1000 per page).
  */
 export async function fetchOzonQuestions(
@@ -466,11 +465,12 @@ export async function fetchOzonQuestions(
   const body: Record<string, unknown> = {
     limit: 100,
     sort_dir: "DESC",
+    filter: {},
   };
   if (lastId) body.last_id = lastId;
 
-  const response = await fetch("https://api-seller.ozon.ru/v1/product/questions/list", {
-    method: "GET",
+  const response = await fetch("https://api-seller.ozon.ru/v1/question/list", {
+    method: "POST",
     headers: {
       "Client-Id": clientId,
       "Api-Key": apiKey,
@@ -486,10 +486,10 @@ export async function fetchOzonQuestions(
 
   const data = await response.json() as OzonQuestionsResponse;
 
-  // Normalize: API may wrap in result.questions or return items directly
-  const rawItems = data.result?.questions ?? data.items ?? [];
-  const hasNext = data.result?.has_next ?? data.has_next ?? false;
-  const nextLastId = data.result?.last_id ?? data.last_id ?? "";
+  // Normalize: POST /v1/question/list returns { questions, has_next, last_id }
+  const rawItems = data.questions ?? data.result?.questions ?? data.items ?? [];
+  const hasNext = data.has_next ?? data.result?.has_next ?? false;
+  const nextLastId = data.last_id ?? data.result?.last_id ?? "";
 
   const normalized: OzonQuestion[] = rawItems.map((item) => ({
     question_id: item.question_id,
@@ -506,7 +506,7 @@ export async function fetchOzonQuestions(
 }
 
 /**
- * Post an answer to a buyer question: POST /v1/product/questions/answer/create
+ * Post an answer to a buyer question: POST /v1/question/answer/create
  */
 export async function postOzonQuestionAnswer(
   clientId: string,
@@ -524,7 +524,7 @@ export async function postOzonQuestionAnswer(
 
       let response: Response;
       try {
-        response = await fetch("https://api-seller.ozon.ru/v1/product/questions/answer/create", {
+        response = await fetch("https://api-seller.ozon.ru/v1/question/answer/create", {
           method: "POST",
           headers: {
             "Client-Id": clientId,
