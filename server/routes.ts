@@ -1368,8 +1368,9 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
 
       const tests = [
         { url: "https://api-seller.ozon.ru/v3/product/info/list", body: { sku: [skuNum] } },
-        { url: "https://api-seller.ozon.ru/v2/product/info/list", body: { sku: [skuNum] } },
-        { url: "https://api-seller.ozon.ru/v2/product/info", body: { sku: skuNum } },
+        { url: "https://api-seller.ozon.ru/v3/product/info/list", body: { offer_id: [], product_id: [], sku: [skuNum] } },
+        { url: "https://api-seller.ozon.ru/v2/product/info", body: { product_id: 0, sku: skuNum } },
+        { url: "https://api-seller.ozon.ru/v1/product/info", body: { product_id: 0, sku: skuNum } },
       ];
 
       const results: any[] = [];
@@ -1379,7 +1380,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
         let parsed: any = null;
         try { parsed = JSON.parse(txt); } catch {}
         const item = parsed?.result?.items?.[0] ?? parsed?.items?.[0] ?? null;
-        results.push({ url: t.url, status: rsp.status, topKeys: parsed ? Object.keys(parsed) : [], name: item?.name ?? null, hasDescription: !!(item?.description) });
+        results.push({ url: t.url, status: rsp.status, topKeys: parsed ? Object.keys(parsed) : [], name: item?.name ?? null, hasDescription: !!(item?.description), message: parsed?.message ?? null });
       }
       res.json({ sku, results });
     } catch(e) { res.json({ error: String(e) }); }
