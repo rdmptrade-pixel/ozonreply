@@ -26,11 +26,14 @@ function markPublishedId(ozonReviewId: string): void {
 }
 
 import { fetchOzonReviewsStreaming, postOzonResponse, testOzonCredentials, parseOzonCsvReviews, OzonPremiumPlusError, fetchOzonQuestions, postOzonQuestionAnswer, fetchOzonQuestionAnswers, fetchOzonProductInfo, fetchAllOzonProductIds, fetchOzonProductInfoByOfferIds } from "./ozon";
-// Use pg pool only if PG_CONNECTION_STRING is available (lazy import)
-async function pgQuery(sql: string, params?: any[]): Promise<any> {
-  const { Pool } = await import("pg");
-  const p = new (Pool as any)({ connectionString: process.env.PG_CONNECTION_STRING, ssl: { rejectUnauthorized: false }, max: 2 });
-  try { return await p.query(sql, params); } finally { await p.end(); }
+// Shared pg pool for direct queries (only used when PG_CONNECTION_STRING is set)
+import { Pool as PgPool } from "pg";
+const _pgPool = process.env.PG_CONNECTION_STRING
+  ? new PgPool({ connectionString: process.env.PG_CONNECTION_STRING, ssl: { rejectUnauthorized: false }, max: 3 })
+  : null;
+async function pgQuery(sql: string, params?: any[]): Promise<{ rows: any[] }> {
+  if (!_pgPool) return { rows: [] };
+  return _pgPool.query(sql, params);
 }
 import { generateAiResponse, generateQuestionAnswer, type AiProvider } from "./ai";
 import {
