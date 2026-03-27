@@ -473,7 +473,7 @@ export async function fetchOzonQuestions(
   const body: Record<string, unknown> = {
     limit: 100,
     sort_dir: "DESC",
-    filter: {},
+    // No filter = get all questions (answered and unanswered)
   };
   if (lastId) body.last_id = lastId;
 
@@ -498,17 +498,15 @@ export async function fetchOzonQuestions(
 
   const data = await response.json() as OzonQuestionsResponse;
 
-  // Log first item to see real field names from Ozon API
   const rawItems = data.questions ?? data.result?.questions ?? data.items ?? [];
-  if (rawItems.length > 0) {
-    console.log("[ozon/questions] First item keys:", Object.keys(rawItems[0]));
-    console.log("[ozon/questions] First item sample:", JSON.stringify(rawItems[0]).slice(0, 500));
-  } else {
-    console.log("[ozon/questions] Response keys:", Object.keys(data));
-    console.log("[ozon/questions] Full response:", JSON.stringify(data).slice(0, 500));
-  }
   const hasNext = data.has_next ?? data.result?.has_next ?? false;
   const nextLastId = data.last_id ?? data.result?.last_id ?? "";
+  const total = (data as any).total ?? (data as any).result?.total ?? null;
+  console.log(`[ozon/questions] items=${rawItems.length} has_next=${hasNext} last_id=${nextLastId} total=${total}`);
+  if (rawItems.length > 0) {
+    console.log("[ozon/questions] First item keys:", Object.keys(rawItems[0]));
+    console.log("[ozon/questions] First item:", JSON.stringify(rawItems[0]).slice(0, 300));
+  }
 
   const normalized: OzonQuestion[] = rawItems.map((item) => {
     // Normalize ID: try all known field names
