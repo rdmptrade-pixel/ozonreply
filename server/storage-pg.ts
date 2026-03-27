@@ -78,9 +78,41 @@ export async function initPgDatabase(): Promise<void> {
       ai_provider TEXT NOT NULL DEFAULT 'deepseek',
       google_sheets_id TEXT NOT NULL DEFAULT '',
       response_template TEXT NOT NULL DEFAULT '',
+      question_template TEXT NOT NULL DEFAULT '',
       auto_publish BOOLEAN NOT NULL DEFAULT FALSE,
       sync_interval INTEGER NOT NULL DEFAULT 30
     );
+
+    CREATE TABLE IF NOT EXISTS questions (
+      id SERIAL PRIMARY KEY,
+      ozon_question_id TEXT NOT NULL UNIQUE,
+      product_id TEXT NOT NULL DEFAULT '',
+      product_name TEXT NOT NULL DEFAULT '',
+      ozon_sku TEXT NOT NULL DEFAULT '',
+      author_name TEXT NOT NULL DEFAULT '',
+      question_text TEXT NOT NULL DEFAULT '',
+      question_date TEXT NOT NULL DEFAULT '',
+      status TEXT NOT NULL DEFAULT 'new',
+      is_answered BOOLEAN NOT NULL DEFAULT FALSE,
+      auto_published BOOLEAN NOT NULL DEFAULT FALSE,
+      created_at TEXT NOT NULL DEFAULT '',
+      updated_at TEXT NOT NULL DEFAULT ''
+    );
+    CREATE INDEX IF NOT EXISTS idx_questions_ozon_id ON questions(ozon_question_id);
+    CREATE INDEX IF NOT EXISTS idx_questions_status ON questions(status);
+
+    CREATE TABLE IF NOT EXISTS question_responses (
+      id SERIAL PRIMARY KEY,
+      question_id INTEGER NOT NULL,
+      response_text TEXT NOT NULL DEFAULT '',
+      original_ai_text TEXT NOT NULL DEFAULT '',
+      ai_generated BOOLEAN NOT NULL DEFAULT TRUE,
+      approved_at TEXT,
+      published_at TEXT,
+      created_at TEXT NOT NULL DEFAULT '',
+      updated_at TEXT NOT NULL DEFAULT ''
+    );
+    CREATE INDEX IF NOT EXISTS idx_question_responses_question_id ON question_responses(question_id);
 
     CREATE TABLE IF NOT EXISTS users (
       id SERIAL PRIMARY KEY,
@@ -187,6 +219,11 @@ export class PgStorage {
 
   async getSettings(): Promise<any> {
     // First check ENV overrides (takes priority over DB)
+    // Attempt to add question_template column if it doesn't exist yet (migration)
+    try {
+      await pool.query("ALTER TABLE settings ADD COLUMN IF NOT EXISTS question_template TEXT NOT NULL DEFAULT ''");
+    } catch {}
+
     const envSettings = this._getEnvSettings();
     if (envSettings) return envSettings;
 
@@ -203,6 +240,7 @@ export class PgStorage {
       aiProvider: row.ai_provider,
       googleSheetsId: row.google_sheets_id,
       responseTemplate: row.response_template,
+      questionTemplate: row.question_template ?? "",
       autoPublish: row.auto_publish,
       syncInterval: row.sync_interval,
     };
@@ -223,16 +261,23 @@ export class PgStorage {
       aiProvider: process.env.AI_PROVIDER ?? "deepseek",
       googleSheetsId: "",
       responseTemplate: process.env.RESPONSE_TEMPLATE ?? "",
+      questionTemplate: "",
       autoPublish: false,
       syncInterval: 30,
     };
   }
 
   async upsertSettings(data: any): Promise<any> {
+    // Ensure column exists (migration for older DBs)
+    try {
+      await pool.query("ALTER TABLE settings ADD COLUMN IF NOT EXISTS question_template TEXT NOT NULL DEFAULT ''");
+    } catch {}
+
     await pool.query(`
       INSERT INTO settings (id, ozon_client_id, ozon_api_key, openai_api_key, deepseek_api_key,
-        perplexity_api_key, ai_provider, google_sheets_id, response_template, auto_publish, sync_interval)
-      VALUES (1, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+        perplexity_api_key, ai_provider, google_sheets_id, response_template, question_template,
+        auto_publish, sync_interval)
+      VALUES (1, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
       ON CONFLICT (id) DO UPDATE SET
         ozon_client_id = EXCLUDED.ozon_client_id,
         ozon_api_key = EXCLUDED.ozon_api_key,
@@ -242,14 +287,15 @@ export class PgStorage {
         ai_provider = EXCLUDED.ai_provider,
         google_sheets_id = EXCLUDED.google_sheets_id,
         response_template = EXCLUDED.response_template,
+        question_template = EXCLUDED.question_template,
         auto_publish = EXCLUDED.auto_publish,
         sync_interval = EXCLUDED.sync_interval
     `, [
       data.ozonClientId, data.ozonApiKey, data.openaiApiKey ?? "",
       data.deepseekApiKey ?? "", data.perplexityApiKey ?? "",
       data.aiProvider ?? "deepseek", data.googleSheetsId ?? "",
-      data.responseTemplate ?? "", data.autoPublish ?? false,
-      data.syncInterval ?? 30,
+      data.responseTemplate ?? "", data.questionTemplate ?? "",
+      data.autoPublish ?? false, data.syncInterval ?? 30,
     ]);
     return { id: 1, ...data };
   }
@@ -479,5 +525,177 @@ export class PgStorage {
       SELECT ozon_review_id FROM reviews WHERE status = 'published'
       ON CONFLICT DO NOTHING
     `);
+  }
+
+  // ── Questions ─────────────────────────────────────────────────────────
+
+  private _rowToQuestion(row: any): any {
+    return {
+      id: row.id,
+      ozonQuestionId: row.ozon_question_id,
+      productId: row.product_id,
+      productName: row.product_name,
+      ozonSku: row.ozon_sku,
+      authorName: row.author_name,
+      questionText: row.question_text,
+      questionDate: row.question_date,
+      status: row.status,
+      isAnswered: Boolean(row.is_answered),
+      autoPublished: Boolean(row.auto_published),
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
+    };
+  }
+
+  private _rowToQuestionResponse(row: any): any {
+    return {
+      id: row.id,
+      questionId: row.question_id,
+      responseText: row.response_text,
+      originalAiText: row.original_ai_text,
+      aiGenerated: Boolean(row.ai_generated),
+      approvedAt: row.approved_at,
+      publishedAt: row.published_at,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
+    };
+  }
+
+  private async _attachQuestionResponse(question: any): Promise<any> {
+    const r = await pool.query(
+      "SELECT * FROM question_responses WHERE question_id = $1 LIMIT 1",
+      [question.id]
+    );
+    return r.rowCount! > 0
+      ? { ...question, response: this._rowToQuestionResponse(r.rows[0]) }
+      : question;
+  }
+
+  async getQuestions(filters?: { status?: string; productId?: string }): Promise<any[]> {
+    let q = "SELECT * FROM questions";
+    const conditions: string[] = [];
+    const vals: any[] = [];
+    if (filters?.status) { vals.push(filters.status); conditions.push(`status = $${vals.length}`); }
+    if (filters?.productId) { vals.push(filters.productId); conditions.push(`product_id = $${vals.length}`); }
+    if (conditions.length) q += " WHERE " + conditions.join(" AND ");
+    q += " ORDER BY created_at DESC";
+    const r = await pool.query(q, vals);
+    const qs = r.rows.map(row => this._rowToQuestion(row));
+    return Promise.all(qs.map(q => this._attachQuestionResponse(q)));
+  }
+
+  async getQuestionById(id: number): Promise<any> {
+    const r = await pool.query("SELECT * FROM questions WHERE id = $1", [id]);
+    if (r.rowCount === 0) return null;
+    return this._attachQuestionResponse(this._rowToQuestion(r.rows[0]));
+  }
+
+  async getQuestionByOzonId(ozonQuestionId: string): Promise<any> {
+    const r = await pool.query("SELECT * FROM questions WHERE ozon_question_id = $1", [ozonQuestionId]);
+    if (r.rowCount === 0) return null;
+    return this._attachQuestionResponse(this._rowToQuestion(r.rows[0]));
+  }
+
+  async createQuestion(data: any): Promise<any> {
+    const ts = nowStr();
+    const r = await pool.query(`
+      INSERT INTO questions (ozon_question_id, product_id, product_name, ozon_sku, author_name,
+        question_text, question_date, status, is_answered, auto_published, created_at, updated_at)
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+      RETURNING *
+    `, [
+      data.ozonQuestionId, data.productId ?? "", data.productName ?? "",
+      data.ozonSku ?? "", data.authorName ?? "", data.questionText ?? "",
+      data.questionDate ?? ts, data.status ?? "new",
+      Boolean(data.isAnswered), Boolean(data.autoPublished), ts, ts,
+    ]);
+    return this._rowToQuestion(r.rows[0]);
+  }
+
+  async updateQuestionStatus(id: number, status: string, extra?: Record<string, unknown>): Promise<any> {
+    const sets = ["status = $1", "updated_at = $2"];
+    const vals: any[] = [status, nowStr()];
+    let i = 3;
+    for (const [k, v] of Object.entries(extra ?? {})) {
+      const col = k.replace(/([A-Z])/g, "_$1").toLowerCase();
+      sets.push(`${col} = $${i++}`);
+      vals.push(v instanceof Date ? v.toISOString() : v);
+    }
+    vals.push(id);
+    const r = await pool.query(
+      `UPDATE questions SET ${sets.join(", ")} WHERE id = $${i} RETURNING *`,
+      vals
+    );
+    return this._rowToQuestion(r.rows[0]);
+  }
+
+  async getQuestionResponseByQuestionId(questionId: number): Promise<any> {
+    const r = await pool.query(
+      "SELECT * FROM question_responses WHERE question_id = $1 LIMIT 1",
+      [questionId]
+    );
+    return r.rowCount! > 0 ? this._rowToQuestionResponse(r.rows[0]) : null;
+  }
+
+  async createQuestionResponse(data: any): Promise<any> {
+    const ts = nowStr();
+    const r = await pool.query(`
+      INSERT INTO question_responses (question_id, response_text, original_ai_text, ai_generated,
+        approved_at, published_at, created_at, updated_at)
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+      RETURNING *
+    `, [
+      data.questionId, data.responseText ?? "",
+      data.originalAiText ?? data.responseText ?? "",
+      Boolean(data.aiGenerated !== false),
+      data.approvedAt instanceof Date ? data.approvedAt.toISOString() : (data.approvedAt ?? null),
+      data.publishedAt instanceof Date ? data.publishedAt.toISOString() : (data.publishedAt ?? null),
+      ts, ts,
+    ]);
+    return this._rowToQuestionResponse(r.rows[0]);
+  }
+
+  async updateQuestionResponse(id: number, data: any): Promise<any> {
+    const sets: string[] = ["updated_at = $1"];
+    const vals: any[] = [nowStr()];
+    let i = 2;
+    const colMap: Record<string, string> = {
+      responseText: "response_text", originalAiText: "original_ai_text",
+      aiGenerated: "ai_generated", approvedAt: "approved_at", publishedAt: "published_at",
+    };
+    for (const [k, v] of Object.entries(data)) {
+      const col = colMap[k] ?? k.replace(/([A-Z])/g, "_$1").toLowerCase();
+      sets.push(`${col} = $${i++}`);
+      vals.push(v instanceof Date ? v.toISOString() : v);
+    }
+    vals.push(id);
+    const r = await pool.query(
+      `UPDATE question_responses SET ${sets.join(", ")} WHERE id = $${i} RETURNING *`,
+      vals
+    );
+    return this._rowToQuestionResponse(r.rows[0]);
+  }
+
+  async getQuestionStats(): Promise<any> {
+    const r = await pool.query("SELECT status FROM questions");
+    const all = r.rows;
+    return {
+      total: all.length,
+      new: all.filter((r: any) => r.status === "new").length,
+      pendingApproval: all.filter((r: any) => r.status === "pending_approval").length,
+      approved: all.filter((r: any) => r.status === "approved").length,
+      published: all.filter((r: any) => r.status === "published").length,
+      rejected: all.filter((r: any) => r.status === "rejected").length,
+    };
+  }
+
+  async resetStuckGeneratingQuestions(): Promise<void> {
+    const r = await pool.query(
+      "UPDATE questions SET status='new', updated_at=$1 WHERE status='generating'",
+      [nowStr()]
+    );
+    if (r.rowCount! > 0) {
+      console.log(`[startup] Reset ${r.rowCount} stuck 'generating' question(s) to 'new'`);
+    }
   }
 }

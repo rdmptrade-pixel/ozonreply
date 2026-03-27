@@ -22,6 +22,7 @@ interface Settings {
   aiProvider: string;
   googleSheetsId: string;
   responseTemplate: string;
+  questionTemplate: string;
   autoPublish: boolean;
   syncInterval: number;
 }
@@ -115,6 +116,7 @@ export default function Settings() {
     aiProvider: "deepseek",
     googleSheetsId: "",
     responseTemplate: "",
+    questionTemplate: "",
     autoPublish: false,
     syncInterval: 30,
   });
@@ -130,6 +132,7 @@ export default function Settings() {
         aiProvider: saved.aiProvider ?? "deepseek",
         googleSheetsId: saved.googleSheetsId ?? "",
         responseTemplate: saved.responseTemplate ?? "",
+        questionTemplate: saved.questionTemplate ?? "",
         autoPublish: saved.autoPublish ?? false,
         syncInterval: saved.syncInterval ?? 30,
       });
@@ -362,6 +365,25 @@ export default function Settings() {
               placeholder={`Например: Отвечай официально, упоминай название магазина «ТехноМаркет». При негативных отзывах предлагай замену или возврат. Контакт поддержки: support@technomarket.ru`}
               className="min-h-[100px] text-sm"
               data-testid="input-template"
+            />
+          </CardContent>
+        </Card>
+
+        {/* Q&A Template */}
+        <Card>
+          <CardHeader className="pb-3">
+            <CardTitle className="text-base">Настройки Q&amp;A</CardTitle>
+            <CardDescription className="text-xs">
+              Шаблон для ответов на вопросы покупателей. Если не задан — используется стандартный промт.
+            </CardDescription>
+          </CardHeader>
+          <CardContent>
+            <Textarea
+              value={form.questionTemplate}
+              onChange={(e) => set("questionTemplate", e.target.value)}
+              placeholder={`Например: Отвечай официально и технически точно. Упоминай магазин «ТехноМаркет». Если вопрос о совместимости — уточни модель устройства покупателя.`}
+              className="min-h-[100px] text-sm"
+              data-testid="input-question-template"
             />
           </CardContent>
         </Card>

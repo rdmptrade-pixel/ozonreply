@@ -161,3 +161,73 @@ ${addressPart}Всегда заканчивай: «С уважением, Ком
 }
 
 export { PROVIDER_CONFIG };
+
+// ── Q&A: генерация ответов на вопросы покупателей ───────────────────────────
+
+interface GenerateQuestionAnswerParams {
+  questionText: string;
+  productName: string;
+  template?: string;
+  apiKey: string;
+  provider: AiProvider;
+}
+
+export async function generateQuestionAnswer(params: GenerateQuestionAnswerParams): Promise<string> {
+  const { questionText, productName, template, apiKey, provider } = params;
+
+  const config = PROVIDER_CONFIG[provider];
+
+  const systemPrompt = template
+    ? `Ты специалист интернет-магазина МП Трейд на Ozon. Отвечай строго на русском языке.
+Используй следующий шаблон: ${template}
+Адаптируй ответ под конкретный вопрос, сохраняя стиль шаблона.
+Всегда заканчивай: «С уважением, Команда МП Трейд».`
+    : `Ты специалист интернет-магазина МП Трейд на Ozon. Отвечай на вопросы покупателей о товаре.
+
+ПРАВИЛА:
+- Отвечай только на русском языке
+- Ответ должен быть конкретным и технически точным — без лишних эмоций
+- Начинай с «Добрый день!»
+- Всегда заканчивай: «С уважением, Команда МП Трейд»
+- Ответ 2–4 предложения (без учёта приветствия и подписи)
+- Не придумывай характеристик, которых нет в описании товара
+- Если не знаешь подробностей — рекомендуй уточнить в дополнительных источниках`;
+
+  const userPrompt = `Товар: ${productName || "(не указан)"}
+Вопрос покупателя: ${questionText}
+
+Напиши ответ (только текст ответа, без кавычек и пояснений):`;
+
+  const body: Record<string, unknown> = {
+    model: config.defaultModel,
+    messages: [
+      { role: "system", content: systemPrompt },
+      { role: "user", content: userPrompt },
+    ],
+    max_tokens: 400,
+    temperature: 0.7,
+    top_p: 0.9,
+  };
+
+  if (provider === "perplexity") {
+    body.disable_search = true;
+  }
+
+  const response = await fetch(`${config.baseUrl}/chat/completions`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${apiKey}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(body),
+  });
+
+  if (!response.ok) {
+    const text = await response.text();
+    throw new Error(`${config.label} API error ${response.status}: ${text}`);
+  }
+
+  const data = await response.json();
+  const raw = data.choices[0]?.message?.content ?? "";
+  return raw.replace(/\n{3,}/g, "\n\n").replace(/\n\n/g, "\n").trim();
+}

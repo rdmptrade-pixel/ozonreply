@@ -412,3 +412,155 @@ function parseDate(s: string): string | null {
 }
 
 export type { OzonReview };
+
+// ── Questions API ─────────────────────────────────────────────────────────────
+
+export interface OzonQuestion {
+  question_id: string;
+  sku: number;
+  product_id: string;
+  product_name: string;
+  author_name: string;
+  created_at: string;
+  question_text: string;
+  is_answered: boolean;
+}
+
+interface OzonQuestionsResponse {
+  result?: {
+    questions?: Array<{
+      question_id: string;
+      sku?: number;
+      product?: { id?: string; name?: string; sku?: number };
+      author?: { name?: string };
+      created_at?: string;
+      text?: string;
+      is_answered?: boolean;
+    }>;
+    has_next?: boolean;
+    last_id?: string;
+    total?: number;
+  };
+  items?: Array<{
+    question_id: string;
+    sku?: number;
+    product?: { id?: string; name?: string; sku?: number };
+    author?: { name?: string };
+    created_at?: string;
+    text?: string;
+    is_answered?: boolean;
+  }>;
+  has_next?: boolean;
+  last_id?: string;
+}
+
+/**
+ * Fetch questions from Ozon: GET /v1/product/questions/list
+ * Returns up to `limit` questions (max 1000 per page).
+ */
+export async function fetchOzonQuestions(
+  clientId: string,
+  apiKey: string,
+  lastId?: string
+): Promise<{ questions: OzonQuestion[]; hasNext: boolean; lastId: string }> {
+  const body: Record<string, unknown> = {
+    limit: 100,
+    sort_dir: "DESC",
+  };
+  if (lastId) body.last_id = lastId;
+
+  const response = await fetch("https://api-seller.ozon.ru/v1/product/questions/list", {
+    method: "GET",
+    headers: {
+      "Client-Id": clientId,
+      "Api-Key": apiKey,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(body),
+  });
+
+  if (!response.ok) {
+    const text = await response.text();
+    throw new Error(`Ozon Questions API error ${response.status}: ${text}`);
+  }
+
+  const data = await response.json() as OzonQuestionsResponse;
+
+  // Normalize: API may wrap in result.questions or return items directly
+  const rawItems = data.result?.questions ?? data.items ?? [];
+  const hasNext = data.result?.has_next ?? data.has_next ?? false;
+  const nextLastId = data.result?.last_id ?? data.last_id ?? "";
+
+  const normalized: OzonQuestion[] = rawItems.map((item) => ({
+    question_id: item.question_id,
+    sku: item.sku ?? item.product?.sku ?? 0,
+    product_id: String(item.product?.id ?? item.sku ?? ""),
+    product_name: item.product?.name ?? "",
+    author_name: item.author?.name ?? "",
+    created_at: item.created_at ?? new Date().toISOString(),
+    question_text: item.text ?? "",
+    is_answered: item.is_answered ?? false,
+  }));
+
+  return { questions: normalized, hasNext, lastId: nextLastId };
+}
+
+/**
+ * Post an answer to a buyer question: POST /v1/product/questions/answer/create
+ */
+export async function postOzonQuestionAnswer(
+  clientId: string,
+  apiKey: string,
+  questionId: string,
+  text: string
+): Promise<boolean> {
+  const MAX_RETRIES = 3;
+  let lastError: Error | null = null;
+
+  for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+    try {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 30_000);
+
+      let response: Response;
+      try {
+        response = await fetch("https://api-seller.ozon.ru/v1/product/questions/answer/create", {
+          method: "POST",
+          headers: {
+            "Client-Id": clientId,
+            "Api-Key": apiKey,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({ question_id: questionId, text }),
+          signal: controller.signal,
+        });
+      } finally {
+        clearTimeout(timeout);
+      }
+
+      if (!response.ok) {
+        const errText = await response.text();
+        if (response.status === 409 || errText.toLowerCase().includes("already") || errText.includes("существует")) {
+          console.log(`Question ${questionId} already has an answer on Ozon — treating as success`);
+          return true;
+        }
+        throw new Error(`Ozon Questions API ${response.status}: ${errText}`);
+      }
+
+      return true;
+    } catch (err: unknown) {
+      const isTimeout = err instanceof Error && (err.name === "AbortError" || err.message.includes("abort"));
+      const isNetwork = err instanceof Error && (err.message.includes("fetch failed") || err.message.includes("ECONNRESET") || err.message.includes("ETIMEDOUT"));
+
+      if ((isTimeout || isNetwork) && attempt < MAX_RETRIES) {
+        console.warn(`Question answer attempt ${attempt} failed, retrying in ${attempt}s...`);
+        await new Promise(r => setTimeout(r, attempt * 1000));
+        lastError = err instanceof Error ? err : new Error(String(err));
+        continue;
+      }
+      throw err;
+    }
+  }
+
+  throw lastError ?? new Error("Не удалось опубликовать ответ на вопрос на Ozon");
+}

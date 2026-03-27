@@ -25,8 +25,8 @@ function markPublishedId(ozonReviewId: string): void {
   _sqliteMarkId(ozonReviewId);
 }
 
-import { fetchOzonReviewsStreaming, postOzonResponse, testOzonCredentials, parseOzonCsvReviews, OzonPremiumPlusError } from "./ozon";
-import { generateAiResponse, type AiProvider } from "./ai";
+import { fetchOzonReviewsStreaming, postOzonResponse, testOzonCredentials, parseOzonCsvReviews, OzonPremiumPlusError, fetchOzonQuestions, postOzonQuestionAnswer } from "./ozon";
+import { generateAiResponse, generateQuestionAnswer, type AiProvider } from "./ai";
 import {
   registerUser,
   loginUser,
@@ -200,7 +200,9 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
   // ── Stats ──────────────────────────────────────────────────────────────────
   app.get("/api/stats", async (_req, res) => {
     const stats = await storage.getStats();
-    res.json(stats);
+    let qStats = { total: 0, new: 0, pendingApproval: 0, approved: 0, published: 0, rejected: 0 };
+    try { qStats = await (storage as any).getQuestionStats(); } catch {}
+    res.json({ ...stats, questions: qStats });
   });
 
   // ── Analytics ────────────────────────────────────────────────────────────────
@@ -1239,4 +1241,210 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       res.status(500).json({ error: String(e) });
     }
   });
+  // ────────────────────────────────────────────────────────────────────────────
+  // Q&A: Вопросы покупателей
+  // ────────────────────────────────────────────────────────────────────────────
+
+  // GET /api/questions — список вопросов с фильтрами
+  app.get("/api/questions", requireAuth, async (req, res) => {
+    try {
+      const status = String(req.query.status ?? "");
+      const product_id = String(req.query.product_id ?? "");
+      const filters: { status?: string; productId?: string } = {};
+      if (status && status !== "all" && status !== "undefined") filters.status = status;
+      if (product_id && product_id !== "undefined") filters.productId = product_id;
+      const questions = await (storage as any).getQuestions(filters);
+      res.json(questions);
+    } catch (e) {
+      res.status(500).json({ error: String(e) });
+    }
+  });
+
+  // POST /api/questions/sync — синхронизация вопросов с Ozon
+  app.post("/api/questions/sync", requireAuth, async (_req, res) => {
+    try {
+      const settings = await storage.getSettings();
+      if (!settings?.ozonClientId || !settings?.ozonApiKey) {
+        res.status(400).json({ error: "Не настроены ключи Ozon API" });
+        return;
+      }
+
+      let synced = 0;
+      let skipped = 0;
+      let lastId: string | undefined;
+      const MAX_PAGES = 100;
+
+      for (let page = 0; page < MAX_PAGES; page++) {
+        const result = await fetchOzonQuestions(settings.ozonClientId, settings.ozonApiKey, lastId);
+        if (!result.questions.length) break;
+
+        for (const q of result.questions) {
+          const existing = await (storage as any).getQuestionByOzonId(q.question_id);
+          if (existing) { skipped++; continue; }
+
+          await (storage as any).createQuestion({
+            ozonQuestionId: q.question_id,
+            productId: q.product_id,
+            productName: q.product_name,
+            ozonSku: String(q.sku),
+            authorName: q.author_name,
+            questionText: q.question_text,
+            questionDate: q.created_at,
+            status: q.is_answered ? "published" : "new",
+            isAnswered: q.is_answered,
+            autoPublished: false,
+          });
+          synced++;
+        }
+
+        if (!result.hasNext || !result.lastId) break;
+        lastId = result.lastId;
+      }
+
+      res.json({ synced, skipped });
+    } catch (e) {
+      console.error("[questions/sync]", e);
+      res.status(500).json({ error: String(e) });
+    }
+  });
+
+  // POST /api/questions/:id/generate — сгенерировать ответ AI
+  app.post("/api/questions/:id/generate", requireAuth, async (req, res) => {
+    const id = parseInt(req.params.id, 10);
+    try {
+      const question = await (storage as any).getQuestionById(id);
+      if (!question) { res.status(404).json({ error: "Вопрос не найден" }); return; }
+
+      const settings = await storage.getSettings();
+      const { apiKey, provider } = getActiveApiKey(settings);
+      if (!apiKey) { res.status(400).json({ error: "Не настроен AI ключ" }); return; }
+
+      await (storage as any).updateQuestionStatus(id, "generating");
+
+      let aiText: string;
+      try {
+        aiText = await generateQuestionAnswer({
+          questionText: question.questionText,
+          productName: question.productName,
+          template: (settings as any)?.questionTemplate || undefined,
+          apiKey,
+          provider,
+        });
+      } catch (e) {
+        await (storage as any).updateQuestionStatus(id, "new");
+        throw e;
+      }
+
+      // Upsert response
+      const existing = await (storage as any).getQuestionResponseByQuestionId(id);
+      if (existing) {
+        await (storage as any).updateQuestionResponse(existing.id, {
+          responseText: aiText,
+          originalAiText: aiText,
+          aiGenerated: true,
+          approvedAt: null,
+          publishedAt: null,
+        });
+      } else {
+        await (storage as any).createQuestionResponse({
+          questionId: id,
+          responseText: aiText,
+          originalAiText: aiText,
+          aiGenerated: true,
+        });
+      }
+
+      await (storage as any).updateQuestionStatus(id, "pending_approval");
+      const updated = await (storage as any).getQuestionById(id);
+      res.json(updated);
+    } catch (e) {
+      console.error("[questions/generate]", e);
+      res.status(500).json({ error: String(e) });
+    }
+  });
+
+  // PATCH /api/questions/:id/response — сохранить отредактированный ответ
+  app.patch("/api/questions/:id/response", requireAuth, async (req, res) => {
+    const id = parseInt(req.params.id, 10);
+    try {
+      const { responseText } = req.body ?? {};
+      if (!responseText) { res.status(400).json({ error: "Нет текста ответа" }); return; }
+      const existing = await (storage as any).getQuestionResponseByQuestionId(id);
+      if (!existing) { res.status(404).json({ error: "Ответ не найден" }); return; }
+      await (storage as any).updateQuestionResponse(existing.id, { responseText });
+      const updated = await (storage as any).getQuestionById(id);
+      res.json(updated);
+    } catch (e) {
+      res.status(500).json({ error: String(e) });
+    }
+  });
+
+  // POST /api/questions/:id/approve — одобрить ответ
+  app.post("/api/questions/:id/approve", requireAuth, async (req, res) => {
+    const id = parseInt(req.params.id, 10);
+    try {
+      const question = await (storage as any).getQuestionById(id);
+      if (!question) { res.status(404).json({ error: "Вопрос не найден" }); return; }
+      const resp = await (storage as any).getQuestionResponseByQuestionId(id);
+      if (resp) {
+        await (storage as any).updateQuestionResponse(resp.id, { approvedAt: new Date().toISOString() });
+      }
+      await (storage as any).updateQuestionStatus(id, "approved");
+      const updated = await (storage as any).getQuestionById(id);
+      res.json(updated);
+    } catch (e) {
+      res.status(500).json({ error: String(e) });
+    }
+  });
+
+  // POST /api/questions/:id/reject — отклонить вопрос
+  app.post("/api/questions/:id/reject", requireAuth, async (req, res) => {
+    const id = parseInt(req.params.id, 10);
+    try {
+      await (storage as any).updateQuestionStatus(id, "rejected");
+      const updated = await (storage as any).getQuestionById(id);
+      res.json(updated);
+    } catch (e) {
+      res.status(500).json({ error: String(e) });
+    }
+  });
+
+  // POST /api/questions/:id/publish — опубликовать ответ на Ozon
+  app.post("/api/questions/:id/publish", requireAuth, async (req, res) => {
+    const id = parseInt(req.params.id, 10);
+    try {
+      const question = await (storage as any).getQuestionById(id);
+      if (!question) { res.status(404).json({ error: "Вопрос не найден" }); return; }
+
+      const resp = await (storage as any).getQuestionResponseByQuestionId(id);
+      if (!resp?.responseText) {
+        res.status(400).json({ error: "Нет текста ответа для публикации" });
+        return;
+      }
+
+      const settings = await storage.getSettings();
+      if (!settings?.ozonClientId || !settings?.ozonApiKey) {
+        res.status(400).json({ error: "Не настроены ключи Ozon API" });
+        return;
+      }
+
+      await postOzonQuestionAnswer(
+        settings.ozonClientId,
+        settings.ozonApiKey,
+        question.ozonQuestionId,
+        resp.responseText
+      );
+
+      const now = new Date().toISOString();
+      await (storage as any).updateQuestionResponse(resp.id, { publishedAt: now });
+      await (storage as any).updateQuestionStatus(id, "published", { isAnswered: true, autoPublished: false });
+      const updated = await (storage as any).getQuestionById(id);
+      res.json({ status: "published", question: updated });
+    } catch (e) {
+      console.error("[questions/publish]", e);
+      res.status(500).json({ error: String(e) });
+    }
+  });
+
+
 }

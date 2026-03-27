@@ -2,8 +2,12 @@ import {
   type Review, type Response, type Settings,
   type InsertReview, type InsertResponse, type InsertSettings,
   type ReviewWithResponse,
+  type Question, type QuestionResponse, type QuestionWithResponse,
+  type InsertQuestion, type InsertQuestionResponse,
   reviews as reviewsTable,
   responses as responsesTable,
+  questions as questionsTable,
+  questionResponses as questionResponsesTable,
 } from "@shared/schema";
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from "fs";
 import { join } from "path";
@@ -89,6 +93,39 @@ function getSqlite() {
       );
       CREATE INDEX IF NOT EXISTS idx_publish_history_published_at ON publish_history(published_at);
       CREATE INDEX IF NOT EXISTS idx_publish_history_ozon_id ON publish_history(ozon_review_id);
+
+      -- Questions module
+      CREATE TABLE IF NOT EXISTS questions (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        ozon_question_id TEXT NOT NULL UNIQUE,
+        product_id TEXT NOT NULL DEFAULT '',
+        product_name TEXT NOT NULL DEFAULT '',
+        ozon_sku TEXT NOT NULL DEFAULT '',
+        author_name TEXT NOT NULL DEFAULT '',
+        question_text TEXT NOT NULL DEFAULT '',
+        question_date TEXT NOT NULL DEFAULT '',
+        status TEXT NOT NULL DEFAULT 'new',
+        is_answered INTEGER NOT NULL DEFAULT 0,
+        auto_published INTEGER NOT NULL DEFAULT 0,
+        created_at TEXT NOT NULL DEFAULT '',
+        updated_at TEXT NOT NULL DEFAULT ''
+      );
+
+      CREATE TABLE IF NOT EXISTS question_responses (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        question_id INTEGER NOT NULL,
+        response_text TEXT NOT NULL DEFAULT '',
+        original_ai_text TEXT NOT NULL DEFAULT '',
+        ai_generated INTEGER NOT NULL DEFAULT 1,
+        approved_at TEXT,
+        published_at TEXT,
+        created_at TEXT NOT NULL DEFAULT '',
+        updated_at TEXT NOT NULL DEFAULT ''
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_questions_ozon_id ON questions(ozon_question_id);
+      CREATE INDEX IF NOT EXISTS idx_questions_status ON questions(status);
+      CREATE INDEX IF NOT EXISTS idx_question_responses_question_id ON question_responses(question_id);
     `);
 
     // Migrations (run once, idempotent)
@@ -154,6 +191,16 @@ export interface IStorage {
   updateResponse(id: number, data: Partial<InsertResponse & { originalAiText?: string }>): Promise<Response>;
   getStats(): Promise<{ total: number; new: number; pendingApproval: number; approved: number; published: number; rejected: number; autoPublished: number }>;
   clearAllData(): Promise<void>;
+  // Questions
+  getQuestions(filters?: { status?: string; productId?: string }): Promise<QuestionWithResponse[]>;
+  getQuestionById(id: number): Promise<QuestionWithResponse | null>;
+  getQuestionByOzonId(ozonQuestionId: string): Promise<QuestionWithResponse | null>;
+  createQuestion(data: InsertQuestion): Promise<Question>;
+  updateQuestionStatus(id: number, status: string, extra?: Record<string, unknown>): Promise<Question>;
+  getQuestionResponseByQuestionId(questionId: number): Promise<QuestionResponse | null>;
+  createQuestionResponse(data: InsertQuestionResponse): Promise<QuestionResponse>;
+  updateQuestionResponse(id: number, data: Partial<InsertQuestionResponse & { originalAiText?: string }>): Promise<QuestionResponse>;
+  getQuestionStats(): Promise<{ total: number; new: number; pendingApproval: number; approved: number; published: number; rejected: number }>;
 }
 
 // ── Implementation ─────────────────────────────────────────────────────────────
@@ -362,6 +409,124 @@ class SqliteStorage implements IStorage {
     // publish_history is intentionally NOT cleared — it's the permanent archive
     console.log("[clearAllData] DB cleared. published_ids.json and publish_history preserved.");
   }
+
+  // ── Questions ─────────────────────────────────────────────────────────────
+
+  private _attachQuestionResponse(question: Question): QuestionWithResponse {
+    const { db } = getSqlite();
+    const resp = db.select().from(questionResponsesTable)
+      .where(eq(questionResponsesTable.questionId, question.id))
+      .get();
+    return resp
+      ? { ...question, response: this._rowToQR(resp) }
+      : question;
+  }
+
+  private _rowToQ(row: any): Question {
+    return { ...row, isAnswered: Boolean(row.isAnswered), autoPublished: Boolean(row.autoPublished) };
+  }
+
+  private _rowToQR(row: any): QuestionResponse {
+    return { ...row, aiGenerated: Boolean(row.aiGenerated) };
+  }
+
+  async getQuestions(filters?: { status?: string; productId?: string }): Promise<QuestionWithResponse[]> {
+    const { db } = getSqlite();
+    const rows = db.select().from(questionsTable)
+      .orderBy(sql`${questionsTable.createdAt} DESC`).all();
+    const result = rows.map(r => this._rowToQ(r)).filter(q => {
+      if (filters?.status && q.status !== filters.status) return false;
+      if (filters?.productId && q.productId !== filters.productId) return false;
+      return true;
+    });
+    return result.map(q => this._attachQuestionResponse(q));
+  }
+
+  async getQuestionById(id: number): Promise<QuestionWithResponse | null> {
+    const { db } = getSqlite();
+    const row = db.select().from(questionsTable).where(eq(questionsTable.id, id)).get();
+    if (!row) return null;
+    return this._attachQuestionResponse(this._rowToQ(row));
+  }
+
+  async getQuestionByOzonId(ozonQuestionId: string): Promise<QuestionWithResponse | null> {
+    const { db } = getSqlite();
+    const row = db.select().from(questionsTable)
+      .where(eq(questionsTable.ozonQuestionId, ozonQuestionId)).get();
+    if (!row) return null;
+    return this._attachQuestionResponse(this._rowToQ(row));
+  }
+
+  async createQuestion(data: InsertQuestion): Promise<Question> {
+    const { db } = getSqlite();
+    const ts = now();
+    const row = db.insert(questionsTable).values({
+      ...data,
+      isAnswered: data.isAnswered ? 1 : 0,
+      autoPublished: (data as any).autoPublished ? 1 : 0,
+      createdAt: ts,
+      updatedAt: ts,
+    } as any).returning().get();
+    return this._rowToQ(row);
+  }
+
+  async updateQuestionStatus(id: number, status: string, extra?: Record<string, unknown>): Promise<Question> {
+    const { db } = getSqlite();
+    const clean: Record<string, unknown> = { status, updatedAt: now() };
+    for (const [k, v] of Object.entries(extra ?? {})) {
+      clean[k] = typeof v === "boolean" ? (v ? 1 : 0) : v instanceof Date ? v.toISOString() : v;
+    }
+    const row = db.update(questionsTable).set(clean as any).where(eq(questionsTable.id, id)).returning().get();
+    if (!row) throw new Error(`Question ${id} not found`);
+    return this._rowToQ(row);
+  }
+
+  async getQuestionResponseByQuestionId(questionId: number): Promise<QuestionResponse | null> {
+    const { db } = getSqlite();
+    const row = db.select().from(questionResponsesTable)
+      .where(eq(questionResponsesTable.questionId, questionId)).get();
+    return row ? this._rowToQR(row) : null;
+  }
+
+  async createQuestionResponse(data: InsertQuestionResponse): Promise<QuestionResponse> {
+    const { db } = getSqlite();
+    const ts = now();
+    const row = db.insert(questionResponsesTable).values({
+      ...data,
+      originalAiText: (data as any).originalAiText ?? data.responseText ?? "",
+      approvedAt: data.approvedAt instanceof Date ? data.approvedAt.toISOString() : (data.approvedAt ?? null),
+      publishedAt: data.publishedAt instanceof Date ? data.publishedAt.toISOString() : (data.publishedAt ?? null),
+      createdAt: ts,
+      updatedAt: ts,
+    }).returning().get();
+    return this._rowToQR(row);
+  }
+
+  async updateQuestionResponse(id: number, data: Partial<InsertQuestionResponse & { originalAiText?: string }>): Promise<QuestionResponse> {
+    const { db } = getSqlite();
+    const clean: Record<string, unknown> = { updatedAt: now() };
+    for (const [k, v] of Object.entries(data)) {
+      clean[k] = v instanceof Date ? v.toISOString() : v;
+    }
+    const row = db.update(questionResponsesTable).set(clean as any)
+      .where(eq(questionResponsesTable.id, id)).returning().get();
+    if (!row) throw new Error(`QuestionResponse ${id} not found`);
+    return this._rowToQR(row);
+  }
+
+  async getQuestionStats(): Promise<{ total: number; new: number; pendingApproval: number; approved: number; published: number; rejected: number }> {
+    const { db } = getSqlite();
+    const all = db.select().from(questionsTable).all();
+    return {
+      total: all.length,
+      new: all.filter(q => q.status === "new").length,
+      pendingApproval: all.filter(q => q.status === "pending_approval").length,
+      approved: all.filter(q => q.status === "approved").length,
+      published: all.filter(q => q.status === "published").length,
+      rejected: all.filter(q => q.status === "rejected").length,
+    };
+  }
+
 }
 
 export const storage = new SqliteStorage();

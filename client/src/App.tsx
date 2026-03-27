@@ -7,6 +7,7 @@ import { Toaster } from "@/components/ui/toaster";
 import { PerplexityAttribution } from "@/components/PerplexityAttribution";
 import Dashboard from "@/pages/Dashboard";
 import Reviews from "@/pages/Reviews";
+import Questions from "@/pages/Questions";
 import Settings from "@/pages/Settings";
 import AdminPanel from "@/pages/AdminPanel";
 import AuthPage from "@/pages/Auth";
@@ -14,6 +15,7 @@ import NotFound from "@/pages/not-found";
 import {
   LayoutDashboard,
   MessageSquare,
+  HelpCircle,
   Settings as SettingsIcon,
   ShoppingBag,
   Moon,
@@ -95,6 +97,7 @@ function Layout({ children }: { children: React.ReactNode }) {
         <nav className="flex-1 p-3 space-y-1" data-testid="sidebar-nav">
           <NavItem href="/" icon={LayoutDashboard} label="Дашборд" />
           <NavItem href="/reviews" icon={MessageSquare} label="Отзывы" />
+          <NavItem href="/questions" icon={HelpCircle} label="Вопросы" />
           <NavItem href="/settings" icon={SettingsIcon} label="Настройки" />
           {isAdmin && <NavItem href="/admin" icon={Shield} label="Пользователи" />}
         </nav>
@@ -174,6 +177,7 @@ function Layout({ children }: { children: React.ReactNode }) {
         >
           <TabItem href="/" icon={LayoutDashboard} label="Дашборд" />
           <TabItem href="/reviews" icon={MessageSquare} label="Отзывы" />
+          <TabItem href="/questions" icon={HelpCircle} label="Вопросы" />
           <TabItem href="/settings" icon={SettingsIcon} label="Настройки" />
           {isAdmin && <TabItem href="/admin" icon={Shield} label="Пользов." />}
         </nav>
@@ -205,6 +209,7 @@ function AppRoutes() {
         <Switch>
           <Route path="/" component={Dashboard} />
           <Route path="/reviews" component={Reviews} />
+          <Route path="/questions" component={Questions} />
           <Route path="/settings" component={Settings} />
           <Route path="/admin" component={AdminPanel} />
           <Route component={NotFound} />
