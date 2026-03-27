@@ -99,6 +99,7 @@ export interface InsertSettings {
   ozonClientId: string;
   ozonApiKey: string;
   questionApiKey: string;
+  productApiKey: string;
   openaiApiKey: string;
   deepseekApiKey: string;
   perplexityApiKey: string;

@@ -1356,42 +1356,13 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     }
   });
 
-  // GET /api/products/debug-one — пробуем все варианты получения инфо о товаре
-  app.get("/api/products/debug-one", async (_req, res) => {
-    try {
-      const settings = await storage.getSettings();
-      const r = await pool.query("SELECT DISTINCT ozon_sku FROM questions WHERE ozon_sku ~ '^[0-9]+$' LIMIT 1");
-      const sku = r.rows[0]?.ozon_sku;
-      if (!sku) { res.json({ error: "no sku found" }); return; }
-      const skuNum = Number(sku);
-      const hdrs = { "Client-Id": settings.ozonClientId, "Api-Key": settings.ozonApiKey, "Content-Type": "application/json" };
-
-      const tests = [
-        { url: "https://api-seller.ozon.ru/v3/product/info/list", body: { sku: [skuNum] } },
-        { url: "https://api-seller.ozon.ru/v3/product/info/list", body: { offer_id: [], product_id: [], sku: [skuNum] } },
-        { url: "https://api-seller.ozon.ru/v2/product/info", body: { product_id: 0, sku: skuNum } },
-        { url: "https://api-seller.ozon.ru/v1/product/info", body: { product_id: 0, sku: skuNum } },
-      ];
-
-      const results: any[] = [];
-      for (const t of tests) {
-        const rsp = await fetch(t.url, { method: "POST", headers: hdrs, body: JSON.stringify(t.body) });
-        const txt = await rsp.text();
-        let parsed: any = null;
-        try { parsed = JSON.parse(txt); } catch {}
-        const item = parsed?.result?.items?.[0] ?? parsed?.items?.[0] ?? null;
-        results.push({ url: t.url, status: rsp.status, topKeys: parsed ? Object.keys(parsed) : [], name: item?.name ?? null, hasDescription: !!(item?.description), message: parsed?.message ?? null });
-      }
-      res.json({ sku, results });
-    } catch(e) { res.json({ error: String(e) }); }
-  });
-
   // POST /api/products/sync-info — загрузить описания товаров из Ozon по всем SKU в базе
   app.post("/api/products/sync-info", requireAuth, async (_req, res) => {
     try {
       const settings = await storage.getSettings();
-      if (!settings?.ozonClientId || !settings?.ozonApiKey) {
-        res.status(400).json({ error: "Не настроены ключи Ozon API" });
+      const productApiKey = (settings as any)?.productApiKey || settings?.ozonApiKey;
+      if (!settings?.ozonClientId || !productApiKey) {
+        res.status(400).json({ error: "Не настроен Product API Key. Добавьте ключ с ролью Products в Настройках." });
         return;
       }
 
@@ -1427,7 +1398,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
         const batch = batchSkus.map(Number).filter(n => !isNaN(n) && n > 0);
         if (!batch.length) continue;
         try {
-          const products = await fetchOzonProductInfo(settings.ozonClientId, settings.ozonApiKey, batch);
+          const products = await fetchOzonProductInfo(settings.ozonClientId, productApiKey, batch);
           console.log(`[products/sync-info] Batch ${i}-${i+BATCH}: got ${products.length} products`);
           for (const p of products) {
             if (!p.sku || !p.name) continue;

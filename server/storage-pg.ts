@@ -73,6 +73,7 @@ export async function initPgDatabase(): Promise<void> {
       ozon_client_id TEXT NOT NULL DEFAULT '',
       ozon_api_key TEXT NOT NULL DEFAULT '',
       question_api_key TEXT NOT NULL DEFAULT '',
+      product_api_key TEXT NOT NULL DEFAULT '',
       openai_api_key TEXT NOT NULL DEFAULT '',
       deepseek_api_key TEXT NOT NULL DEFAULT '',
       perplexity_api_key TEXT NOT NULL DEFAULT '',
@@ -238,6 +239,9 @@ export class PgStorage {
     try {
       await pool.query("ALTER TABLE settings ADD COLUMN IF NOT EXISTS question_api_key TEXT NOT NULL DEFAULT ''");
     } catch {}
+    try {
+      await pool.query("ALTER TABLE settings ADD COLUMN IF NOT EXISTS product_api_key TEXT NOT NULL DEFAULT ''");
+    } catch {}
 
     // Always read from DB first
     const r = await pool.query("SELECT * FROM settings WHERE id = 1");
@@ -250,6 +254,7 @@ export class PgStorage {
         ...envSettings,
         // All user-managed fields: prefer DB value if set (non-empty)
         questionApiKey:   dbRow?.question_api_key   || envSettings.questionApiKey   || "",
+        productApiKey:    dbRow?.product_api_key     || envSettings.productApiKey    || "",
         openaiApiKey:     dbRow?.openai_api_key      || envSettings.openaiApiKey     || "",
         deepseekApiKey:   dbRow?.deepseek_api_key    || envSettings.deepseekApiKey   || "",
         perplexityApiKey: dbRow?.perplexity_api_key  || envSettings.perplexityApiKey || "",
@@ -268,6 +273,7 @@ export class PgStorage {
       ozonClientId: dbRow.ozon_client_id,
       ozonApiKey: dbRow.ozon_api_key,
       questionApiKey: dbRow.question_api_key ?? "",
+      productApiKey: dbRow.product_api_key ?? "",
       openaiApiKey: dbRow.openai_api_key,
       deepseekApiKey: dbRow.deepseek_api_key,
       perplexityApiKey: dbRow.perplexity_api_key,
@@ -290,6 +296,7 @@ export class PgStorage {
       ozonClientId: clientId,
       ozonApiKey: apiKey,
       questionApiKey: process.env.QUESTION_API_KEY ?? "",
+      productApiKey: process.env.PRODUCT_API_KEY ?? "",
       openaiApiKey: process.env.OPENAI_API_KEY ?? "",
       deepseekApiKey: process.env.DEEPSEEK_API_KEY ?? "",
       perplexityApiKey: process.env.PERPLEXITY_API_KEY ?? "",
@@ -310,16 +317,20 @@ export class PgStorage {
     try {
       await pool.query("ALTER TABLE settings ADD COLUMN IF NOT EXISTS question_api_key TEXT NOT NULL DEFAULT ''");
     } catch {}
+    try {
+      await pool.query("ALTER TABLE settings ADD COLUMN IF NOT EXISTS product_api_key TEXT NOT NULL DEFAULT ''");
+    } catch {}
 
     await pool.query(`
-      INSERT INTO settings (id, ozon_client_id, ozon_api_key, question_api_key, openai_api_key,
-        deepseek_api_key, perplexity_api_key, ai_provider, google_sheets_id, response_template,
-        question_template, auto_publish, sync_interval)
-      VALUES (1, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+      INSERT INTO settings (id, ozon_client_id, ozon_api_key, question_api_key, product_api_key,
+        openai_api_key, deepseek_api_key, perplexity_api_key, ai_provider, google_sheets_id,
+        response_template, question_template, auto_publish, sync_interval)
+      VALUES (1, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
       ON CONFLICT (id) DO UPDATE SET
         ozon_client_id = EXCLUDED.ozon_client_id,
         ozon_api_key = EXCLUDED.ozon_api_key,
         question_api_key = EXCLUDED.question_api_key,
+        product_api_key = EXCLUDED.product_api_key,
         openai_api_key = EXCLUDED.openai_api_key,
         deepseek_api_key = EXCLUDED.deepseek_api_key,
         perplexity_api_key = EXCLUDED.perplexity_api_key,
@@ -330,7 +341,7 @@ export class PgStorage {
         auto_publish = EXCLUDED.auto_publish,
         sync_interval = EXCLUDED.sync_interval
     `, [
-      data.ozonClientId, data.ozonApiKey, data.questionApiKey ?? "",
+      data.ozonClientId, data.ozonApiKey, data.questionApiKey ?? "", data.productApiKey ?? "",
       data.openaiApiKey ?? "", data.deepseekApiKey ?? "", data.perplexityApiKey ?? "",
       data.aiProvider ?? "deepseek", data.googleSheetsId ?? "",
       data.responseTemplate ?? "", data.questionTemplate ?? "",

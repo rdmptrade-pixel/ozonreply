@@ -111,6 +111,7 @@ export default function Settings() {
     ozonClientId: "",
     ozonApiKey: "",
     questionApiKey: "",
+    productApiKey: "",
     openaiApiKey: "",
     deepseekApiKey: "",
     perplexityApiKey: "",
@@ -128,6 +129,7 @@ export default function Settings() {
         ozonClientId: saved.ozonClientId ?? "",
         ozonApiKey: saved.ozonApiKey ?? "",
         questionApiKey: saved.questionApiKey ?? "",
+        productApiKey: (saved as any).productApiKey ?? "",
         openaiApiKey: saved.openaiApiKey ?? "",
         deepseekApiKey: saved.deepseekApiKey ?? "",
         perplexityApiKey: saved.perplexityApiKey ?? "",
@@ -390,8 +392,20 @@ export default function Settings() {
                 data-testid="input-question-api-key"
               />
               <p className="text-xs text-muted-foreground">
-                Создайте отдельный ключ в Ozon Seller с ролями <strong>Question read only</strong> и <strong>Question Answer</strong>.
-                Если не задан — используется основной API Key.
+                Роль: <strong>Question</strong> (9 методов) — чтение и запись ответов.
+              </p>
+            </div>
+            <div className="space-y-1.5">
+              <label className="text-xs font-medium text-muted-foreground">Product API Key</label>
+              <Input
+                type="password"
+                value={(form as any).productApiKey ?? ""}
+                onChange={(e) => set("productApiKey" as any, e.target.value)}
+                placeholder="Ozon API ключ для загрузки описаний товаров"
+                data-testid="input-product-api-key"
+              />
+              <p className="text-xs text-muted-foreground">
+                Роль: <strong>Analytics</strong> или <strong>Products</strong> — для получения названий и описаний товаров.
               </p>
             </div>
             <div className="space-y-1.5">
