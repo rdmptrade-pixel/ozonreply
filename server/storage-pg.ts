@@ -242,18 +242,22 @@ export class PgStorage {
     const r = await pool.query("SELECT * FROM settings WHERE id = 1");
     const dbRow = r.rowCount && r.rowCount > 0 ? r.rows[0] : null;
 
-    // ENV overrides for core credentials, but DB values win for user-managed fields
+    // ENV provides defaults, but DB values ALWAYS win for any field set via UI
     const envSettings = this._getEnvSettings();
     if (envSettings) {
       return {
         ...envSettings,
-        // These fields are managed via UI — prefer DB value if set
-        questionApiKey: dbRow?.question_api_key || envSettings.questionApiKey || "",
-        questionTemplate: dbRow?.question_template || envSettings.questionTemplate || "",
-        responseTemplate: dbRow?.response_template || envSettings.responseTemplate || "",
-        googleSheetsId: dbRow?.google_sheets_id || envSettings.googleSheetsId || "",
-        autoPublish: dbRow?.auto_publish ?? envSettings.autoPublish,
-        syncInterval: dbRow?.sync_interval ?? envSettings.syncInterval,
+        // All user-managed fields: prefer DB value if set (non-empty)
+        questionApiKey:   dbRow?.question_api_key   || envSettings.questionApiKey   || "",
+        openaiApiKey:     dbRow?.openai_api_key      || envSettings.openaiApiKey     || "",
+        deepseekApiKey:   dbRow?.deepseek_api_key    || envSettings.deepseekApiKey   || "",
+        perplexityApiKey: dbRow?.perplexity_api_key  || envSettings.perplexityApiKey || "",
+        aiProvider:       dbRow?.ai_provider         || envSettings.aiProvider       || "deepseek",
+        googleSheetsId:   dbRow?.google_sheets_id    || envSettings.googleSheetsId   || "",
+        responseTemplate: dbRow?.response_template   || envSettings.responseTemplate || "",
+        questionTemplate: dbRow?.question_template   || envSettings.questionTemplate || "",
+        autoPublish:      dbRow?.auto_publish        ?? envSettings.autoPublish,
+        syncInterval:     dbRow?.sync_interval       ?? envSettings.syncInterval,
       };
     }
 
