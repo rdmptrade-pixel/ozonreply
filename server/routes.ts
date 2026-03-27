@@ -25,7 +25,9 @@ function markPublishedId(ozonReviewId: string): void {
   _sqliteMarkId(ozonReviewId);
 }
 
-import { fetchOzonReviewsStreaming, postOzonResponse, testOzonCredentials, parseOzonCsvReviews, OzonPremiumPlusError, fetchOzonQuestions, postOzonQuestionAnswer } from "./ozon";
+import { fetchOzonReviewsStreaming, postOzonResponse, testOzonCredentials, parseOzonCsvReviews, OzonPremiumPlusError, fetchOzonQuestions, postOzonQuestionAnswer, fetchOzonQuestionAnswers, fetchOzonProductInfo } from "./ozon";
+import { Pool } from "pg";
+const pool = new Pool({ connectionString: process.env.PG_CONNECTION_STRING, ssl: { rejectUnauthorized: false } });
 import { generateAiResponse, generateQuestionAnswer, type AiProvider } from "./ai";
 import {
   registerUser,
@@ -1284,9 +1286,32 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
 
         for (const q of result.questions) {
           const existing = await (storage as any).getQuestionByOzonId(q.question_id);
-          if (existing) { skipped++; continue; }
 
-          await (storage as any).createQuestion({
+          if (existing) {
+            // If already in DB but now answered — update status and save Ozon answer
+            if (q.is_answered && existing.status === "new") {
+              await (storage as any).updateQuestionStatus(existing.id, "published", { isAnswered: true });
+              // Load and save Ozon's original answer as knowledge base
+              try {
+                const answers = await fetchOzonQuestionAnswers(settings.ozonClientId, questionApiKey, q.question_id);
+                if (answers.length > 0) {
+                  const existingResp = await (storage as any).getQuestionResponseByQuestionId(existing.id);
+                  if (!existingResp) {
+                    await (storage as any).createQuestionResponse({
+                      questionId: existing.id,
+                      responseText: answers[0].answerText,
+                      originalAiText: answers[0].answerText,
+                      aiGenerated: false,
+                    });
+                  }
+                }
+              } catch {}
+            }
+            skipped++;
+            continue;
+          }
+
+          const savedQ = await (storage as any).createQuestion({
             ozonQuestionId: q.question_id,
             productId: q.product_id,
             productName: q.product_name,
@@ -1300,6 +1325,21 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
           });
           synced++;
 
+          // For answered questions: load Ozon's answer as knowledge base
+          if (q.is_answered && savedQ) {
+            try {
+              const answers = await fetchOzonQuestionAnswers(settings.ozonClientId, questionApiKey, q.question_id);
+              if (answers.length > 0) {
+                await (storage as any).createQuestionResponse({
+                  questionId: savedQ.id,
+                  responseText: answers[0].answerText,
+                  originalAiText: answers[0].answerText,
+                  aiGenerated: false,
+                });
+              }
+            } catch {}
+          }
+
           // Stop if limit reached
           if (maxNew > 0 && synced >= maxNew) break outer;
         }
@@ -1311,6 +1351,57 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       res.json({ synced, skipped });
     } catch (e) {
       console.error("[questions/sync]", e);
+      res.status(500).json({ error: String(e) });
+    }
+  });
+
+  // POST /api/products/sync-info — загрузить описания товаров из Ozon по всем SKU в базе
+  app.post("/api/products/sync-info", requireAuth, async (_req, res) => {
+    try {
+      const settings = await storage.getSettings();
+      if (!settings?.ozonClientId || !settings?.ozonApiKey) {
+        res.status(400).json({ error: "Не настроены ключи Ozon API" });
+        return;
+      }
+
+      // Collect unique SKUs from questions table
+      const skuRows = await pool.query(
+        "SELECT DISTINCT ozon_sku FROM questions WHERE ozon_sku != '' ORDER BY ozon_sku"
+      );
+      const allSkus = skuRows.rows.map((r: any) => r.ozon_sku).filter(Boolean);
+
+      if (!allSkus.length) {
+        res.json({ synced: 0, message: "Нет SKU для загрузки — сначала синхронизируйте вопросы" });
+        return;
+      }
+
+      // Fetch in batches of 100 (Ozon API limit)
+      const BATCH = 100;
+      let synced = 0;
+      for (let i = 0; i < allSkus.length; i += BATCH) {
+        const batch = allSkus.slice(i, i + BATCH).map(Number).filter(n => !isNaN(n));
+        if (!batch.length) continue;
+        try {
+          const products = await fetchOzonProductInfo(settings.ozonClientId, settings.ozonApiKey, batch);
+          for (const p of products) {
+            if (!p.sku) continue;
+            await (storage as any).upsertProductCache({
+              ozonSku: p.sku,
+              productId: p.productId,
+              name: p.name,
+              description: [p.description, p.attributes].filter(Boolean).join("\n"),
+              attributes: p.attributes,
+            });
+            synced++;
+          }
+        } catch (e) {
+          console.error(`[products/sync-info] batch error:`, e);
+        }
+      }
+
+      res.json({ synced, total: allSkus.length });
+    } catch (e) {
+      console.error("[products/sync-info]", e);
       res.status(500).json({ error: String(e) });
     }
   });
@@ -1328,11 +1419,24 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
 
       await (storage as any).updateQuestionStatus(id, "generating");
 
+      // Load product description from cache
+      const productCache = question.ozonSku
+        ? await (storage as any).getProductCache?.(question.ozonSku).catch(() => null)
+        : null;
+
+      // Load knowledge base: answered Q&A for same SKU
+      const knowledgeBase = question.ozonSku
+        ? await (storage as any).getKnowledgeBySku?.(question.ozonSku, 5).catch(() => [])
+        : [];
+
       let aiText: string;
       try {
         aiText = await generateQuestionAnswer({
           questionText: question.questionText,
-          productName: question.productName,
+          productName: question.productName || productCache?.name || "",
+          productDescription: productCache?.description || undefined,
+          productAttributes: productCache?.attributes || undefined,
+          knowledgeBase: knowledgeBase?.length ? knowledgeBase : undefined,
           template: (settings as any)?.questionTemplate || undefined,
           apiKey,
           provider,

@@ -110,3 +110,14 @@ export interface InsertSettings {
   syncInterval: number;
 }
 export type Settings = InsertSettings & { id: number };
+
+// ── Product Cache (описания товаров из Ozon, по SKU) ──────────────────────────
+export interface ProductCache {
+  id: number;
+  ozonSku: string;
+  productId: string;
+  name: string;
+  description: string;
+  attributes: string;
+  updatedAt: string;
+}

@@ -353,8 +353,21 @@ export default function Questions() {
   });
 
   const [syncing, setSyncing] = useState(false);
+  const [syncingProducts, setSyncingProducts] = useState(false);
   const [fetchLimit, setFetchLimit] = useState("100");
   const { toast } = useToast();
+
+  const handleSyncProducts = async () => {
+    setSyncingProducts(true);
+    try {
+      const res = await apiRequest("POST", "/api/products/sync-info");
+      const data = await res.json();
+      toast({ title: `Описания загружены: ${data.synced} из ${data.total} товаров` });
+    } catch (e: any) {
+      toast({ title: "Ошибка", description: e.message, variant: "destructive" });
+    }
+    setSyncingProducts(false);
+  };
 
   const handleSync = async () => {
     setSyncing(true);
@@ -405,6 +418,22 @@ export default function Questions() {
             </SelectContent>
           </Select>
         </div>
+      </div>
+
+      {/* Product info sync */}
+      <div className="mb-3 flex items-center gap-2">
+        <Button
+          size="sm"
+          variant="ghost"
+          onClick={handleSyncProducts}
+          disabled={syncingProducts}
+          className="h-7 text-xs text-muted-foreground"
+          data-testid="btn-sync-products"
+        >
+          <RefreshCw size={11} className={syncingProducts ? "animate-spin mr-1" : "mr-1"} />
+          {syncingProducts ? "Загрузка описаний..." : "Загрузить описания товаров"}
+        </Button>
+        <span className="text-xs text-muted-foreground">— для улучшения генерации ответов</span>
       </div>
 
       {/* Filters */}

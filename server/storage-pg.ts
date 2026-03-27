@@ -130,6 +130,17 @@ export async function initPgDatabase(): Promise<void> {
     CREATE TABLE IF NOT EXISTS published_ids (
       ozon_review_id TEXT PRIMARY KEY
     );
+
+    CREATE TABLE IF NOT EXISTS product_cache (
+      id SERIAL PRIMARY KEY,
+      ozon_sku TEXT NOT NULL UNIQUE,
+      product_id TEXT NOT NULL DEFAULT '',
+      name TEXT NOT NULL DEFAULT '',
+      description TEXT NOT NULL DEFAULT '',
+      attributes TEXT NOT NULL DEFAULT '',
+      updated_at TEXT NOT NULL DEFAULT ''
+    );
+    CREATE INDEX IF NOT EXISTS idx_product_cache_sku ON product_cache(ozon_sku);
   `);
 
   // Seed settings from ENV on first run (if table is empty)
@@ -720,5 +731,56 @@ export class PgStorage {
     if (r.rowCount! > 0) {
       console.log(`[startup] Reset ${r.rowCount} stuck 'generating' question(s) to 'new'`);
     }
+  }
+
+  // ── Product Cache ─────────────────────────────────────────────────────────
+
+  async upsertProductCache(data: {
+    ozonSku: string;
+    productId: string;
+    name: string;
+    description: string;
+    attributes: string;
+  }): Promise<void> {
+    await pool.query(`
+      INSERT INTO product_cache (ozon_sku, product_id, name, description, attributes, updated_at)
+      VALUES ($1, $2, $3, $4, $5, $6)
+      ON CONFLICT (ozon_sku) DO UPDATE SET
+        product_id = EXCLUDED.product_id,
+        name = EXCLUDED.name,
+        description = EXCLUDED.description,
+        attributes = EXCLUDED.attributes,
+        updated_at = EXCLUDED.updated_at
+    `, [data.ozonSku, data.productId, data.name, data.description, data.attributes, nowStr()]);
+  }
+
+  async getProductCache(ozonSku: string): Promise<any | null> {
+    const r = await pool.query("SELECT * FROM product_cache WHERE ozon_sku = $1", [ozonSku]);
+    if (!r.rowCount) return null;
+    const row = r.rows[0];
+    return { ozonSku: row.ozon_sku, productId: row.product_id, name: row.name, description: row.description, attributes: row.attributes, updatedAt: row.updated_at };
+  }
+
+  async getAllProductCacheSkus(): Promise<string[]> {
+    const r = await pool.query("SELECT ozon_sku FROM product_cache");
+    return r.rows.map((row: any) => row.ozon_sku);
+  }
+
+  /**
+   * Get up to `limit` answered questions for a given SKU as knowledge base context.
+   * Returns pairs of {question, answer} for AI prompt.
+   */
+  async getKnowledgeBySku(ozonSku: string, limit = 5): Promise<Array<{ question: string; answer: string }>> {
+    const r = await pool.query(`
+      SELECT q.question_text, qr.response_text
+      FROM questions q
+      JOIN question_responses qr ON qr.question_id = q.id
+      WHERE q.ozon_sku = $1
+        AND q.status = 'published'
+        AND qr.response_text != ''
+      ORDER BY q.created_at DESC
+      LIMIT $2
+    `, [ozonSku, limit]);
+    return r.rows.map((row: any) => ({ question: row.question_text, answer: row.response_text }));
   }
 }

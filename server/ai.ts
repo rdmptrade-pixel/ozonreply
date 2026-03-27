@@ -167,33 +167,46 @@ export { PROVIDER_CONFIG };
 interface GenerateQuestionAnswerParams {
   questionText: string;
   productName: string;
+  productDescription?: string;   // из product_cache
+  productAttributes?: string;    // из product_cache
+  knowledgeBase?: Array<{ question: string; answer: string }>; // похожие Q&A по SKU
   template?: string;
   apiKey: string;
   provider: AiProvider;
 }
 
 export async function generateQuestionAnswer(params: GenerateQuestionAnswerParams): Promise<string> {
-  const { questionText, productName, template, apiKey, provider } = params;
+  const { questionText, productName, productDescription, productAttributes, knowledgeBase, template, apiKey, provider } = params;
 
   const config = PROVIDER_CONFIG[provider];
 
-  const systemPrompt = template
-    ? `Ты специалист интернет-магазина МП Трейд на Ozon. Отвечай строго на русском языке.
-Используй следующий шаблон: ${template}
-Адаптируй ответ под конкретный вопрос, сохраняя стиль шаблона.
-Всегда заканчивай: «С уважением, Команда МП Трейд».`
-    : `Ты специалист интернет-магазина МП Трейд на Ozon. Отвечай на вопросы покупателей о товаре.
+  // Build product context block
+  const productCtx: string[] = [];
+  if (productDescription) productCtx.push(`Описание: ${productDescription.slice(0, 800)}`);
+  if (productAttributes) productCtx.push(`Характеристики: ${productAttributes.slice(0, 400)}`);
 
-ПРАВИЛА:
-- Отвечай только на русском языке
-- Ответ должен быть конкретным и технически точным — без лишних эмоций
-- Начинай с «Добрый день!»
-- Всегда заканчивай: «С уважением, Команда МП Трейд»
-- Ответ 2–4 предложения (без учёта приветствия и подписи)
-- Не придумывай характеристик, которых нет в описании товара
-- Если не знаешь подробностей — рекомендуй уточнить в дополнительных источниках`;
+  // Build knowledge base block (answered Q&A for this SKU)
+  let knowledgeCtx = "";
+  if (knowledgeBase && knowledgeBase.length > 0) {
+    const pairs = knowledgeBase
+      .slice(0, 5)
+      .map((kb, i) => `${i + 1}. В: ${kb.question}\n   О: ${kb.answer}`)
+      .join("\n");
+    knowledgeCtx = `\n\nПримеры ответов на аналогичные вопросы по этому товару (используй как ориентир):\n${pairs}`;
+  }
 
-  const userPrompt = `Товар: ${productName || "(не указан)"}
+  const baseInstructions = template
+    ? `Ты специалист интернет-магазина МП Трейд на Ozon. Отвечай строго на русском языке.\nИспользуй следующий шаблон: ${template}\nАдаптируй ответ под конкретный вопрос, сохраняя стиль шаблона.\nВсегда заканчивай: «С уважением, Команда МП Трейд».`
+    : `Ты специалист интернет-магазина МП Трейд на Ozon. Отвечай на вопросы покупателей о товаре.\n\nПРАВИЛА:\n- Отвечай только на русском языке\n- Ответ конкретный и технически точный — без лишних эмоций\n- Начинай с «Добрый день!»\n- Всегда заканчивай: «С уважением, Команда МП Трейд»\n- Ответ 2–4 предложения (без учёта приветствия и подписи)\n- Основывайсь только на данные из описания товара и примерах ответов\n- Если не знаешь подробностей — честно скажи об этом`;
+
+  const systemPrompt = baseInstructions;
+
+  const productBlock = productCtx.length
+    ? `\nДанные товара:\n${productCtx.join("\n")}${knowledgeCtx}`
+    : knowledgeCtx;
+
+  const userPrompt = `Товар: ${productName || "(не указан)"}${productBlock}
+
 Вопрос покупателя: ${questionText}
 
 Напиши ответ (только текст ответа, без кавычек и пояснений):`;

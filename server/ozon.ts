@@ -595,3 +595,105 @@ export async function postOzonQuestionAnswer(
 
   throw lastError ?? new Error("Не удалось опубликовать ответ на вопрос на Ozon");
 }
+
+// ── Product Info Cache ─────────────────────────────────────────────────────────
+
+export interface OzonProductInfo {
+  sku: string;
+  productId: string;
+  name: string;
+  description: string;
+  fullDescription: string; // rich description if available
+  attributes: string; // JSON stringified key attributes
+}
+
+/**
+ * Fetch product info from Ozon by SKU list: POST /v2/product/info/list
+ * Returns name, description and key attributes for AI context.
+ */
+export async function fetchOzonProductInfo(
+  clientId: string,
+  apiKey: string,
+  skus: number[]
+): Promise<OzonProductInfo[]> {
+  if (!skus.length) return [];
+
+  const response = await fetch("https://api-seller.ozon.ru/v2/product/info/list", {
+    method: "POST",
+    headers: {
+      "Client-Id": clientId,
+      "Api-Key": apiKey,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ sku: skus }),
+  });
+
+  if (!response.ok) {
+    const text = await response.text();
+    throw new Error(`Ozon Product Info API error ${response.status}: ${text}`);
+  }
+
+  const data = await response.json() as { items?: any[]; result?: { items?: any[] } };
+  const items = data.items ?? data.result?.items ?? [];
+
+  return items.map((item: any) => {
+    // Extract key attributes as short text
+    const attrs: string[] = [];
+    for (const attr of item.attributes ?? []) {
+      const name = attr.attribute_id ? String(attr.attribute_id) : "";
+      const val = attr.values?.[0]?.value ?? "";
+      if (name && val) attrs.push(`${val}`);
+    }
+
+    return {
+      sku: String(item.sku ?? ""),
+      productId: String(item.id ?? item.product_id ?? ""),
+      name: item.name ?? "",
+      description: item.description ?? "",
+      fullDescription: item.rich_content ?? item.description ?? "",
+      attributes: attrs.slice(0, 20).join(", "),
+    };
+  });
+}
+
+// ── Question Answers ───────────────────────────────────────────────────────────
+
+export interface OzonQuestionAnswer {
+  questionId: string;
+  answerText: string;
+  createdAt: string;
+}
+
+/**
+ * Fetch answers for a question: POST /v1/question/answer/list
+ */
+export async function fetchOzonQuestionAnswers(
+  clientId: string,
+  apiKey: string,
+  questionId: string
+): Promise<OzonQuestionAnswer[]> {
+  const response = await fetch("https://api-seller.ozon.ru/v1/question/answer/list", {
+    method: "POST",
+    headers: {
+      "Client-Id": clientId,
+      "Api-Key": apiKey,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ question_id: questionId }),
+  });
+
+  if (!response.ok) {
+    // Non-fatal — just return empty
+    console.warn(`[ozon/question-answers] ${response.status} for ${questionId}`);
+    return [];
+  }
+
+  const data = await response.json() as { answers?: any[]; result?: { answers?: any[] } };
+  const answers = data.answers ?? data.result?.answers ?? [];
+
+  return answers.map((a: any) => ({
+    questionId,
+    answerText: a.text ?? a.answer ?? "",
+    createdAt: a.created_at ?? new Date().toISOString(),
+  }));
+}
