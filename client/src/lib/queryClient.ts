@@ -1,7 +1,8 @@
 import { QueryClient, QueryFunction } from "@tanstack/react-query";
 import { getToken } from "./auth";
 
-export const API_BASE = "__PORT_5000__".startsWith("__") ? "" : "__PORT_5000__";
+// API is served from the same origin — no base URL needed
+export const API_BASE = "";
 
 async function throwIfResNotOk(res: Response) {
   if (!res.ok) {
