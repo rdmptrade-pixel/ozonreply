@@ -73,7 +73,7 @@ function Layout({ children }: { children: React.ReactNode }) {
     document.documentElement.classList.toggle("dark", dark);
   }, [dark]);
 
-  const isAdmin = user?.role === "admin" || user?.role === "superadmin";
+  const isSuperadmin = user?.role === "superadmin";
 
   return (
     <div className="flex min-h-screen bg-background">
@@ -99,7 +99,7 @@ function Layout({ children }: { children: React.ReactNode }) {
           <NavItem href="/reviews" icon={MessageSquare} label="Отзывы" />
           <NavItem href="/questions" icon={HelpCircle} label="Вопросы" />
           <NavItem href="/settings" icon={SettingsIcon} label="Настройки" />
-          {isAdmin && <NavItem href="/admin" icon={Shield} label="Пользователи" />}
+          {isSuperadmin && <NavItem href="/admin" icon={Shield} label="Пользователи" />}
         </nav>
 
         {/* Footer */}
@@ -182,7 +182,7 @@ function Layout({ children }: { children: React.ReactNode }) {
           <TabItem href="/reviews" icon={MessageSquare} label="Отзывы" />
           <TabItem href="/questions" icon={HelpCircle} label="Вопросы" />
           <TabItem href="/settings" icon={SettingsIcon} label="Настройки" />
-          {isAdmin && <TabItem href="/admin" icon={Shield} label="Пользов." />}
+          {isSuperadmin && <TabItem href="/admin" icon={Shield} label="Пользов." />}
         </nav>
       </div>
 
