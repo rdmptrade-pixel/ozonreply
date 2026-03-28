@@ -73,7 +73,7 @@ function Layout({ children }: { children: React.ReactNode }) {
     document.documentElement.classList.toggle("dark", dark);
   }, [dark]);
 
-  const isAdmin = user?.role === "admin";
+  const isAdmin = user?.role === "admin" || user?.role === "superadmin";
 
   return (
     <div className="flex min-h-screen bg-background">
@@ -108,7 +108,10 @@ function Layout({ children }: { children: React.ReactNode }) {
           {user && (
             <div className="px-3 py-2 text-xs text-muted-foreground truncate">
               {user.name}
-              {isAdmin && (
+              {user?.role === "superadmin" && (
+                <span className="ml-1.5 text-purple-500 font-medium">· Суперадмин</span>
+              )}
+              {user?.role === "admin" && (
                 <span className="ml-1.5 text-primary font-medium">· Админ</span>
               )}
             </div>
