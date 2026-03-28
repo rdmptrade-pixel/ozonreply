@@ -1,8 +1,8 @@
 import { QueryClient, QueryFunction } from "@tanstack/react-query";
 import { getToken } from "./auth";
 
-// API is served from the same origin — no base URL needed
-export const API_BASE = "";
+// Use relative path so requests work correctly through the Perplexity proxy
+export const API_BASE = ".";
 
 async function throwIfResNotOk(res: Response) {
   if (!res.ok) {

@@ -59,8 +59,9 @@ export interface UserPublic {
   id: number;
   email: string;
   name: string;
-  role: "admin" | "user";
+  role: "superadmin" | "admin" | "user";
   status: "pending" | "approved" | "rejected";
+  tenantId: number | null;
   createdAt: string;
   approvedAt?: string;
 }
