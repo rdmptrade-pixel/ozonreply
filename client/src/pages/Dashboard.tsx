@@ -136,7 +136,7 @@ export default function Dashboard() {
       if (exportFrom) params.set("from", exportFrom);
       if (exportTo) params.set("to", exportTo);
       const url = `${API_BASE}/api/export/excel?${params.toString()}`;
-      const resp = await fetch(url);
+      const resp = await fetch(url, { headers: { Authorization: `Bearer ${getToken() ?? ""}` } });
       if (!resp.ok) throw new Error(await resp.text());
       const blob = await resp.blob();
       const a = document.createElement("a");
@@ -208,7 +208,7 @@ export default function Dashboard() {
       const limitVal = fetchLimit === "0" ? 0 : parseInt(fetchLimit, 10);
       const response = await fetch(url, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${getToken() ?? ""}` },
         body: JSON.stringify({ limit: limitVal }),
       });
 

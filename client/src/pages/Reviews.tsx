@@ -379,7 +379,11 @@ export default function Reviews() {
       if (ratingFilter !== "all") params.set("rating", ratingFilter);
       const qs = params.toString();
       const url = `${API_BASE}/api/reviews${qs ? "?" + qs : ""}`;
-      const r = await fetch(url);
+      const token = getToken();
+      const r = await fetch(url, {
+        headers: token ? { Authorization: `Bearer ${token}` } : {},
+      });
+      if (r.status === 401) return [];
       return r.json();
     },
     staleTime: 10_000,
