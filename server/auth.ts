@@ -120,13 +120,16 @@ export async function registerUser(
     }
     const passwordHash = await bcrypt.hash(password, 10);
     const isFirstUser = users.length === 0;
+    // Owner of a new tenant is auto-approved (they registered themselves)
+    // Only users added manually inside an existing tenant need approval
+    const isAutoApproved = isSuperadmin || isFirstUser || !!tenantId;
     const user: User = {
       id: nextId(users),
       email: normalizedEmail,
       passwordHash,
       name: name.trim(),
       role: isSuperadmin ? "superadmin" : (tenantId ? "admin" : "user"),
-      status: isSuperadmin || isFirstUser ? "approved" : "pending",
+      status: isAutoApproved ? "approved" : "pending",
       tenantId: isSuperadmin ? null : tenantId,
       createdAt: new Date().toISOString(),
     };
@@ -141,13 +144,14 @@ export async function registerUser(
   }
   const passwordHash = await bcrypt.hash(password, 10);
   const isFirstUser = users.length === 0;
+  const isAutoApproved = isSuperadmin || isFirstUser || !!tenantId;
   const user: User = {
     id: nextId(users),
     email: normalizedEmail,
     passwordHash,
     name: name.trim(),
     role: isSuperadmin ? "superadmin" : (tenantId ? "admin" : "user"),
-    status: isSuperadmin || isFirstUser ? "approved" : "pending",
+    status: isAutoApproved ? "approved" : "pending",
     tenantId: isSuperadmin ? null : tenantId,
     createdAt: new Date().toISOString(),
   };

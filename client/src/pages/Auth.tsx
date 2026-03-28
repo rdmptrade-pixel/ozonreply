@@ -29,8 +29,10 @@ export default function AuthPage() {
     } else {
       if (!name.trim()) { setError("Введите имя"); setLoading(false); return; }
       const res = await register(email, password, name);
-      if (!res.ok) setError(res.error ?? "Ошибка");
-      else setMode("success");
+      if (!res.ok) { setError(res.error ?? "Ошибка"); setLoading(false); return; }
+      // Auto-login after successful registration
+      const loginRes = await login(email, password);
+      if (!loginRes.ok) setMode("success"); // fallback: show pending screen
     }
     setLoading(false);
   };
