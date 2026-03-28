@@ -11,11 +11,11 @@ const USERS_FILE = path.join(DATA_DIR, "users.json");
 const JWT_SECRET = process.env.JWT_SECRET || "ozonreply-jwt-secret-2026";
 const JWT_EXPIRES = "30d";
 
-// First account — automatically admin
-const ADMIN_EMAIL = "rd.mptrade@gmail.com";
+// First account / superadmin email
+const SUPERADMIN_EMAIL = "rd.mptrade@gmail.com";
 
 export type UserStatus = "pending" | "approved" | "rejected";
-export type UserRole = "admin" | "user";
+export type UserRole = "superadmin" | "admin" | "user";
 
 export interface User {
   id: number;
@@ -24,6 +24,7 @@ export interface User {
   name: string;
   role: UserRole;
   status: UserStatus;
+  tenantId: number | null; // null only for superadmin
   createdAt: string;
   approvedAt?: string;
   approvedBy?: string;
@@ -35,6 +36,7 @@ export interface UserPublic {
   name: string;
   role: UserRole;
   status: UserStatus;
+  tenantId: number | null;
   createdAt: string;
   approvedAt?: string;
 }
@@ -61,7 +63,6 @@ function saveUsers(users: User[]) {
 function _pgUsers(): any { return (globalThis as any).__pgUsers; }
 
 export function getAllUsersSync(): User[] {
-  // PG version is async — callers in routes will use getAllUsersAsync() instead
   return loadUsers();
 }
 
@@ -99,13 +100,16 @@ export function verifyToken(token: string): { userId: number } | null {
 export async function registerUser(
   email: string,
   password: string,
-  name: string
+  name: string,
+  tenantId: number | null = null
 ): Promise<{ ok: true; user: UserPublic } | { ok: false; error: string }> {
   const normalizedEmail = email.toLowerCase().trim();
 
   if (password.length < 6) {
     return { ok: false, error: "Пароль должен быть не менее 6 символов" };
   }
+
+  const isSuperadmin = normalizedEmail === SUPERADMIN_EMAIL.toLowerCase();
 
   const pg = _pgUsers();
   if (pg) {
@@ -116,14 +120,14 @@ export async function registerUser(
     }
     const passwordHash = await bcrypt.hash(password, 10);
     const isFirstUser = users.length === 0;
-    const isAdminEmail = normalizedEmail === ADMIN_EMAIL.toLowerCase();
     const user: User = {
       id: nextId(users),
       email: normalizedEmail,
       passwordHash,
       name: name.trim(),
-      role: isAdminEmail || isFirstUser ? "admin" : "user",
-      status: isAdminEmail || isFirstUser ? "approved" : "pending",
+      role: isSuperadmin ? "superadmin" : (tenantId ? "admin" : "user"),
+      status: isSuperadmin || isFirstUser ? "approved" : "pending",
+      tenantId: isSuperadmin ? null : tenantId,
       createdAt: new Date().toISOString(),
     };
     await pg.saveUserPg(user);
@@ -137,14 +141,14 @@ export async function registerUser(
   }
   const passwordHash = await bcrypt.hash(password, 10);
   const isFirstUser = users.length === 0;
-  const isAdminEmail = normalizedEmail === ADMIN_EMAIL.toLowerCase();
   const user: User = {
     id: nextId(users),
     email: normalizedEmail,
     passwordHash,
     name: name.trim(),
-    role: isAdminEmail || isFirstUser ? "admin" : "user",
-    status: isAdminEmail || isFirstUser ? "approved" : "pending",
+    role: isSuperadmin ? "superadmin" : (tenantId ? "admin" : "user"),
+    status: isSuperadmin || isFirstUser ? "approved" : "pending",
+    tenantId: isSuperadmin ? null : tenantId,
     createdAt: new Date().toISOString(),
   };
   users.push(user);
@@ -280,6 +284,7 @@ export function deleteUser(targetId: number): { ok: boolean; error?: string } {
 
 export interface AuthRequest extends Request {
   user?: UserPublic;
+  tenantId?: number;
 }
 
 // Async-aware auth middleware (works with both SQLite and PostgreSQL)
@@ -305,6 +310,8 @@ export function requireAuth(req: AuthRequest, res: Response, next: NextFunction)
       return;
     }
     req.user = toPublic(user);
+    // Attach tenantId to request for downstream use
+    req.tenantId = user.tenantId ?? undefined;
     next();
   }).catch(() => {
     res.status(500).json({ error: "Ошибка авторизации" });
@@ -313,10 +320,30 @@ export function requireAuth(req: AuthRequest, res: Response, next: NextFunction)
 
 export function requireAdmin(req: AuthRequest, res: Response, next: NextFunction) {
   requireAuth(req, res, () => {
-    if ((req as AuthRequest).user?.role !== "admin") {
+    const role = (req as AuthRequest).user?.role;
+    if (role !== "admin" && role !== "superadmin") {
       res.status(403).json({ error: "Требуются права администратора" });
       return;
     }
     next();
   });
+}
+
+export function requireSuperadmin(req: AuthRequest, res: Response, next: NextFunction) {
+  requireAuth(req, res, () => {
+    if ((req as AuthRequest).user?.role !== "superadmin") {
+      res.status(403).json({ error: "Требуются права суперадмина" });
+      return;
+    }
+    next();
+  });
+}
+
+// ── Tenant helpers ────────────────────────────────────────────────────────────
+
+// Returns tenantId from authenticated request.
+// Superadmin has no tenant — throws if called for superadmin without explicit tenantId.
+export function getTenantId(req: AuthRequest): number {
+  if (req.tenantId !== undefined && req.tenantId !== null) return req.tenantId;
+  throw new Error("Tenant не определён для данного пользователя");
 }

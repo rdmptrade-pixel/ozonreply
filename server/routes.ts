@@ -2,6 +2,7 @@ import type { Express } from "express";
 import type { Server } from "http";
 import { storage as _baseStorage, loadPublishedIds as _sqliteLoadIds, markPublishedId as _sqliteMarkId } from "./storage";
 import * as _storageModule from "./storage";
+import type { Settings } from "@shared/schema";
 
 // Unified storage proxy: reads activeStorage at call time so PG is used after initStorage()
 const storage = new Proxy({} as typeof _baseStorage, {
@@ -11,6 +12,43 @@ const storage = new Proxy({} as typeof _baseStorage, {
     return typeof val === "function" ? val.bind(backend) : val;
   }
 });
+
+// ── Tenant-aware storage helper ────────────────────────────────────────────────
+// Returns a thin wrapper that injects tenantId into storage calls requiring it.
+// Superadmin (tenantId = undefined/null) defaults to tenant 1 for backward compat.
+function tStorage(tenantId: number | undefined | null) {
+  const tid = tenantId ?? 1;
+  return {
+    getSettings: () => storage.getSettings(tid),
+    upsertSettings: (data: any) => storage.upsertSettings(data, tid),
+    getReviews: (filters?: any) => storage.getReviews(tid, filters),
+    getReviewById: (id: number) => storage.getReviewById(id, tid),
+    getReviewByOzonId: (ozonId: string) => storage.getReviewByOzonId(ozonId, tid),
+    createReview: (data: any) => storage.createReview({ ...data, tenantId: tid }),
+    updateReviewStatus: (id: number, status: string, extra?: any) => storage.updateReviewStatus(id, status, extra),
+    getResponseByReviewId: (reviewId: number) => storage.getResponseByReviewId(reviewId),
+    createResponse: (data: any) => storage.createResponse({ ...data, tenantId: tid }),
+    updateResponse: (id: number, data: any) => storage.updateResponse(id, data),
+    getStats: () => storage.getStats(tid),
+    clearAllData: () => storage.clearAllData(tid),
+    getPublishHistory: (from?: string, to?: string) => (storage as any).getPublishHistory(tid, from, to),
+    recordPublishHistory: (entry: any) => (storage as any).recordPublishHistory({ ...entry, tenantId: tid }),
+    getQuestions: (filters?: any) => storage.getQuestions(tid, filters),
+    getQuestionById: (id: number) => storage.getQuestionById(id, tid),
+    getQuestionByOzonId: (ozonId: string) => storage.getQuestionByOzonId(ozonId, tid),
+    createQuestion: (data: any) => storage.createQuestion({ ...data, tenantId: tid }),
+    updateQuestionStatus: (id: number, status: string, extra?: any) => storage.updateQuestionStatus(id, status, extra),
+    getQuestionResponseByQuestionId: (qid: number) => storage.getQuestionResponseByQuestionId(qid),
+    createQuestionResponse: (data: any) => storage.createQuestionResponse({ ...data, tenantId: tid }),
+    updateQuestionResponse: (id: number, data: any) => storage.updateQuestionResponse(id, data),
+    getQuestionStats: () => storage.getQuestionStats(tid),
+  };
+}
+
+// Helper to get tenantId from authenticated request
+function reqTenantId(req: any): number {
+  return req.tenantId ?? 1;
+}
 
 // Published IDs: use PG when available, SQLite otherwise
 async function loadPublishedIds(): Promise<Set<string>> {
@@ -44,6 +82,7 @@ import {
   deleteUserAsync,
   requireAuth,
   requireAdmin,
+  requireSuperadmin,
   type AuthRequest,
 } from "./auth";
 
@@ -59,19 +98,34 @@ function getActiveApiKey(settings: { aiProvider?: string; openaiApiKey?: string;
 export async function registerRoutes(httpServer: Server, app: Express): Promise<void> {
   // ── Auth ───────────────────────────────────────────────────────────────────
 
-  // Register new user
+  // Register new user — creates a new tenant + owner
   app.post("/api/auth/register", async (req, res) => {
-    const { email, password, name } = req.body ?? {};
+    const { email, password, name, companyName } = req.body ?? {};
     if (!email || !password || !name) {
       res.status(400).json({ error: "Укажите email, пароль и имя" });
       return;
     }
-    const result = await registerUser(email, password, name);
+
+    // Create tenant first (unless this is the superadmin email)
+    const SUPERADMIN_EMAIL = "rd.mptrade@gmail.com";
+    const isSuperadmin = email.toLowerCase().trim() === SUPERADMIN_EMAIL.toLowerCase();
+
+    let tenantId: number | null = null;
+    if (!isSuperadmin) {
+      const tenant = await storage.createTenant({
+        name: companyName || name,
+        plan: "trial",
+        status: "active",
+      });
+      tenantId = tenant.id;
+    }
+
+    const result = await registerUser(email, password, name, tenantId);
     if (!result.ok) {
       res.status(400).json({ error: result.error });
       return;
     }
-    res.json({ user: result.user });
+    res.json({ user: result.user, tenantId });
   });
 
   // Login
@@ -151,9 +205,57 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     res.json({ ok: true });
   });
 
+  // ── Tenants (superadmin only) ────────────────────────────────────────────────
+
+  // List all tenants
+  app.get("/api/admin/tenants", requireSuperadmin, async (_req, res) => {
+    const tenants = await storage.getTenants();
+    // Add per-tenant user count
+    const users = await getAllUsersAsync();
+    const result = tenants.map((t: any) => ({
+      ...t,
+      userCount: users.filter((u: any) => u.tenantId === t.id).length,
+    }));
+    res.json(result);
+  });
+
+  // Get single tenant
+  app.get("/api/admin/tenants/:id", requireSuperadmin, async (req, res) => {
+    const id = parseInt(req.params.id, 10);
+    const tenant = await storage.getTenantById(id);
+    if (!tenant) { res.status(404).json({ error: "Тенант не найден" }); return; }
+    res.json(tenant);
+  });
+
+  // Update tenant (plan, status)
+  app.patch("/api/admin/tenants/:id", requireSuperadmin, async (req, res) => {
+    const id = parseInt(req.params.id, 10);
+    const { plan, status, name } = req.body ?? {};
+    const allowed: any = {};
+    if (plan && ["trial", "paid", "suspended"].includes(plan)) allowed.plan = plan;
+    if (status && ["active", "suspended"].includes(status)) allowed.status = status;
+    if (name) allowed.name = name;
+    const tenant = await storage.updateTenant(id, allowed);
+    res.json(tenant);
+  });
+
+  // Suspend tenant
+  app.post("/api/admin/tenants/:id/suspend", requireSuperadmin, async (req, res) => {
+    const id = parseInt(req.params.id, 10);
+    const tenant = await storage.updateTenant(id, { status: "suspended" });
+    res.json(tenant);
+  });
+
+  // Activate tenant
+  app.post("/api/admin/tenants/:id/activate", requireSuperadmin, async (req, res) => {
+    const id = parseInt(req.params.id, 10);
+    const tenant = await storage.updateTenant(id, { status: "active" });
+    res.json(tenant);
+  });
+
   // ── Settings ───────────────────────────────────────────────────────────────
-  app.get("/api/settings", async (_req, res) => {
-    const s = await storage.getSettings();
+  app.get("/api/settings", requireAuth, async (req, res) => {
+    const s = await tStorage(reqTenantId(req)).getSettings();
     res.json(s ?? {
       id: 0,
       ozonClientId: "",
@@ -169,9 +271,9 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     });
   });
 
-  app.post("/api/settings", async (req, res) => {
+  app.post("/api/settings", requireAuth, async (req, res) => {
     try {
-      const s = await storage.upsertSettings(req.body);
+      const s = await tStorage(reqTenantId(req)).upsertSettings(req.body);
       res.json(s);
     } catch (e: unknown) {
       res.status(400).json({ error: String(e) });
@@ -179,8 +281,8 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
   });
 
   // ── AI Balance ──────────────────────────────────────────────────────────────
-  app.get("/api/ai/balance", async (_req, res) => {
-    const settings = await storage.getSettings();
+  app.get("/api/ai/balance", requireAuth, async (req, res) => {
+    const settings = await tStorage(reqTenantId(req)).getSettings();
     const { apiKey, provider } = getActiveApiKey(settings);
     if (!apiKey) return res.json({ available: false, error: "Нет API ключа" });
 
@@ -207,17 +309,17 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
   });
 
   // ── Stats ──────────────────────────────────────────────────────────────────
-  app.get("/api/stats", async (_req, res) => {
-    const stats = await storage.getStats();
+  app.get("/api/stats", requireAuth, async (req, res) => {
+    const stats = await tStorage(reqTenantId(req)).getStats();
     let qStats = { total: 0, new: 0, pendingApproval: 0, approved: 0, published: 0, rejected: 0 };
-    try { qStats = await (storage as any).getQuestionStats(); } catch {}
+    try { qStats = await tStorage(reqTenantId(req)).getQuestionStats(); } catch {}
     res.json({ ...stats, questions: qStats });
   });
 
   // ── Analytics ────────────────────────────────────────────────────────────────
   // Returns time-series data grouped by local day/hour for the selected period
   // Query params: period=day|week|month|custom, from=ISO, to=ISO, tzOffset=minutes (e.g. -180 for MSK)
-  app.get("/api/analytics", async (req, res) => {
+  app.get("/api/analytics", requireAuth, async (req, res) => {
     try {
       const { period, from, to, tzOffset: tzOffsetStr } = req.query as Record<string, string>;
 
@@ -273,7 +375,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
 
       // Fetch all reviews in range and group in JS — works for both SQLite and PostgreSQL.
       // Use created_at (when loaded into system) for time-series grouping.
-      const allReviews = await storage.getReviews();
+      const allReviews = await tStorage(reqTenantId(req)).getReviews();
       const inRange = allReviews.filter((r) => {
         const ts = r.createdAt;
         return ts >= fromISO && ts <= toISO;
@@ -337,8 +439,8 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
   });
 
   // ── Reviews list ───────────────────────────────────────────────────────────
-  app.get("/api/reviews", async (req, res) => {
-    let reviews = await storage.getReviews();
+  app.get("/api/reviews", requireAuth, async (req, res) => {
+    let reviews = await tStorage(reqTenantId(req)).getReviews();
     const { status, rating } = req.query;
     if (status && status !== "all") {
       reviews = reviews.filter((r) => r.status === status);
@@ -349,14 +451,14 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     res.json(reviews);
   });
 
-  app.get("/api/reviews/:id", async (req, res) => {
-    const review = await storage.getReviewById(Number(req.params.id));
+  app.get("/api/reviews/:id", requireAuth, async (req, res) => {
+    const review = await tStorage(reqTenantId(req)).getReviewById(Number(req.params.id));
     if (!review) return res.status(404).json({ error: "Not found" });
     res.json(review);
   });
 
   // ── Test Ozon credentials ────────────────────────────────────────────────
-  app.post("/api/ozon/test", async (req, res) => {
+  app.post("/api/ozon/test", requireAuth, async (req, res) => {
     const { clientId, apiKey } = req.body;
     if (!clientId || !apiKey) {
       return res.status(400).json({ error: "Укажите Client-ID и API ключ" });
@@ -370,7 +472,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
   });
 
   // ── Import reviews from CSV ────────────────────────────────────────────────
-  app.post("/api/reviews/import-csv", async (req, res) => {
+  app.post("/api/reviews/import-csv", requireAuth, async (req, res) => {
     const { csvText } = req.body;
     if (!csvText) {
       return res.status(400).json({ error: "csvText required" });
@@ -379,9 +481,9 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       const ozonReviews = parseOzonCsvReviews(csvText);
       let newCount = 0;
       for (const or of ozonReviews) {
-        const existing = await storage.getReviewByOzonId(or.review_id);
+        const existing = await tStorage(reqTenantId(req)).getReviewByOzonId(or.review_id);
         if (!existing) {
-          await storage.createReview({
+          await tStorage(reqTenantId(req)).createReview({
             ozonReviewId: or.review_id,
             productId: String(or.product_id ?? or.sku ?? ""),
             productName: or.product_name ?? "",
@@ -405,20 +507,20 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
   // Tracks whether background generation/publish is in progress
   let backgroundTasksRunning = 0;
 
-  app.get("/api/background-status", (_req, res) => {
+  app.get("/api/background-status", requireAuth, (req, res) => {
     res.json({ busy: backgroundTasksRunning > 0, tasks: backgroundTasksRunning });
   });
 
   // ── Background auto-generate queue ──────────────────────────────────────
   // Auto-generates AI responses for all "new" text reviews after fetch
   async function runAutoGenerateQueue(
-    settings: Awaited<ReturnType<typeof storage.getSettings>>
+    settings: Settings | null
   ): Promise<void> {
     if (!settings) return;
     const { apiKey, provider } = getActiveApiKey(settings);
     if (!apiKey) return;
 
-    const allReviews = await storage.getReviews();
+    const allReviews = await tStorage(reqTenantId(req)).getReviews();
     // Only text reviews (not auto-publishable) with status "new"
     const toGenerate = allReviews.filter(
       (r) => r.status === "new" && (r.reviewText ?? "").trim() !== ""
@@ -429,7 +531,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
 
     for (const review of toGenerate) {
       try {
-        await storage.updateReviewStatus(review.id, "generating");
+        await tStorage(reqTenantId(req)).updateReviewStatus(review.id, "generating");
         const responseText = await generateAiResponse({
           productName: review.productName,
           authorName: review.authorName,
@@ -440,11 +542,11 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
           provider,
         });
 
-        const existing = await storage.getResponseByReviewId(review.id);
+        const existing = await tStorage(reqTenantId(req)).getResponseByReviewId(review.id);
         if (existing) {
-          await storage.updateResponse(existing.id, { responseText, aiGenerated: true });
+          await tStorage(reqTenantId(req)).updateResponse(existing.id, { responseText, aiGenerated: true });
         } else {
-          await storage.createResponse({
+          await tStorage(reqTenantId(req)).createResponse({
             reviewId: review.id,
             responseText,
             aiGenerated: true,
@@ -453,11 +555,11 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
             publishedAt: null,
           });
         }
-        await storage.updateReviewStatus(review.id, "pending_approval");
+        await tStorage(reqTenantId(req)).updateReviewStatus(review.id, "pending_approval");
         console.log(`[auto-generate] Done: ${review.ozonReviewId}`);
       } catch (e) {
         console.error(`[auto-generate] Failed for ${review.ozonReviewId}:`, e);
-        await storage.updateReviewStatus(review.id, "new");
+        await tStorage(reqTenantId(req)).updateReviewStatus(review.id, "new");
       }
     }
     console.log(`[auto-generate] Queue complete`);
@@ -467,7 +569,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
   // Runs after fetch completes — processes queued auto-publishable reviews asynchronously
   async function runAutoPublishQueue(
     reviewIds: number[],
-    settings: Awaited<ReturnType<typeof storage.getSettings>>
+    settings: Settings | null
   ): Promise<void> {
     if (!settings || reviewIds.length === 0) return;
     const { apiKey, provider } = getActiveApiKey(settings);
@@ -477,7 +579,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
 
     for (const reviewId of reviewIds) {
       try {
-        const review = await storage.getReviewById(reviewId);
+        const review = await tStorage(reqTenantId(req)).getReviewById(reviewId);
         if (!review || review.status !== "new") continue; // already processed
 
         const responseText = await generateAiResponse({
@@ -491,7 +593,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
         });
 
         const now = new Date();
-        const savedResponse = await storage.createResponse({
+        const savedResponse = await tStorage(reqTenantId(req)).createResponse({
           reviewId: review.id,
           responseText,
           aiGenerated: true,
@@ -515,11 +617,11 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
         }
 
         if (publishOk) {
-          await storage.updateResponse(savedResponse.id, { publishedAt: now });
-          await storage.updateReviewStatus(review.id, "published", { autoPublished: true });
+          await tStorage(reqTenantId(req)).updateResponse(savedResponse.id, { publishedAt: now });
+          await tStorage(reqTenantId(req)).updateReviewStatus(review.id, "published", { autoPublished: true });
           markPublishedId(review.ozonReviewId);
           // Record to persistent history
-          storage.recordPublishHistory({
+          tStorage(reqTenantId(req)).recordPublishHistory({
             ozonReviewId: review.ozonReviewId,
             ozonSku: review.ozonSku ?? review.productId ?? "",
             productName: review.productName,
@@ -532,7 +634,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
           });
           console.log(`[auto-publish] OK: ${review.ozonReviewId}`);
         } else {
-          await storage.updateReviewStatus(review.id, "pending_approval");
+          await tStorage(reqTenantId(req)).updateReviewStatus(review.id, "pending_approval");
         }
       } catch (autoErr) {
         console.error(`[auto-publish] Error for reviewId=${reviewId}:`, autoErr);
@@ -543,8 +645,8 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
   }
 
   // ── Fetch from Ozon (streaming with progress via POST + ndjson) ────────────
-  app.post("/api/reviews/fetch-from-ozon-stream", async (req, res) => {
-    const settings = await storage.getSettings();
+  app.post("/api/reviews/fetch-from-ozon-stream", requireAuth, async (req, res) => {
+    const settings = await tStorage(reqTenantId(req)).getSettings();
     if (!settings?.ozonClientId || !settings?.ozonApiKey) {
       res.status(400).json({ error: "Настройте Ozon API ключи в разделе Настройки" });
       return;
@@ -586,7 +688,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
             // Skip reviews we already published (even if DB was cleared)
             if (publishedIds.has(or.review_id)) continue;
 
-            const existing = await storage.getReviewByOzonId(or.review_id);
+            const existing = await tStorage(reqTenantId(req)).getReviewByOzonId(or.review_id);
             if (existing) continue;
 
             const reviewRating = or.rating ?? 5;
@@ -594,7 +696,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
             const isAutoPublishable = reviewRating >= 4 && reviewText === "";
 
             // Phase 1: save review quickly (no AI/Ozon calls here)
-            const savedReview = await storage.createReview({
+            const savedReview = await tStorage(reqTenantId(req)).createReview({
               ozonReviewId: or.review_id,
               productId: String(or.product_id ?? or.sku ?? ""),
               productName: or.product_name ?? "",
@@ -639,7 +741,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       send({ type: "done", fetched, new: newCount, stopped, autoPublished: autoPublishQueue.length, autoPublishPending: autoPublishQueue.length });
       res.end();
 
-      const settingsSnap = await storage.getSettings();
+      const settingsSnap = await tStorage(reqTenantId(req)).getSettings();
 
       // Phase 2: run auto-publish in background (after response sent)
       if (autoPublishQueue.length > 0) {
@@ -656,7 +758,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
         .finally(() => { backgroundTasksRunning = Math.max(0, backgroundTasksRunning - 1); });
 
       // Phase 4: catch any stuck auto-publishable reviews (4-5★ no text) missed during load
-      const stuckIds = (await storage.getReviews())
+      const stuckIds = (await tStorage(reqTenantId(req)).getReviews())
         .filter((r) => r.status === "new" && (r.reviewText ?? "").trim() === "" && r.rating >= 4)
         .map((r) => r.id);
       if (stuckIds.length > 0) {
@@ -677,8 +779,8 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
   });
 
   // ── Fetch from Ozon (simple POST, kept for compatibility) ──────────────────
-  app.post("/api/reviews/fetch-from-ozon", async (_req, res) => {
-    const settings = await storage.getSettings();
+  app.post("/api/reviews/fetch-from-ozon", requireAuth, async (req, res) => {
+    const settings = await tStorage(reqTenantId(req)).getSettings();
     if (!settings?.ozonClientId || !settings?.ozonApiKey) {
       return res.status(400).json({ error: "Настройте Ozon API ключи в разделе Настройки" });
     }
@@ -698,12 +800,12 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
             // Skip reviews that already have an answer on Ozon
             if (or.is_answered) continue;
 
-            const existing = await storage.getReviewByOzonId(or.review_id);
+            const existing = await tStorage(reqTenantId(req)).getReviewByOzonId(or.review_id);
             if (existing) {
               foundExisting = true;
               continue;
             }
-            await storage.createReview({
+            await tStorage(reqTenantId(req)).createReview({
               ozonReviewId: or.review_id,
               productId: String(or.product_id ?? or.sku ?? ""),
               productName: or.product_name ?? "",
@@ -739,15 +841,15 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
 
   // ── Process stuck auto-publishable reviews ──────────────────────────────────
   // Runs auto-publish for reviews stuck in 'new' status with no text (4-5★)
-  app.post("/api/reviews/process-stuck", async (_req, res) => {
-    const settings = await storage.getSettings();
+  app.post("/api/reviews/process-stuck", requireAuth, async (req, res) => {
+    const settings = await tStorage(reqTenantId(req)).getSettings();
     if (!settings?.ozonClientId || !settings?.ozonApiKey) {
       return res.status(400).json({ error: "Настройте Ozon API ключи" });
     }
     const { apiKey } = getActiveApiKey(settings);
     if (!apiKey) return res.status(400).json({ error: "Настройте API ключ AI" });
 
-    const reviews = await storage.getReviews();
+    const reviews = await tStorage(reqTenantId(req)).getReviews();
     const stuck = reviews
       .filter(r => r.status === "new" && (r.reviewText ?? "").trim() === "" && r.rating >= 4)
       .map(r => r.id);
@@ -763,9 +865,9 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
   });
 
   // ── Clear all reviews & responses ───────────────────────────────────────────
-  app.post("/api/reviews/clear-all", async (_req, res) => {
+  app.post("/api/reviews/clear-all", requireAuth, async (req, res) => {
     try {
-      await storage.clearAllData();
+      await tStorage(reqTenantId(req)).clearAllData();
       res.json({ success: true });
     } catch (e: unknown) {
       res.status(500).json({ error: String(e) });
@@ -773,7 +875,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
   });
 
   // ── Add demo reviews ───────────────────────────────────────────────────────
-  app.post("/api/reviews/add-demo", async (_req, res) => {
+  app.post("/api/reviews/add-demo", requireAuth, async (req, res) => {
     const demos = [
       {
         ozonReviewId: `demo_${Date.now()}_1`,
@@ -823,9 +925,9 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
 
     let created = 0;
     for (const d of demos) {
-      const existing = await storage.getReviewByOzonId(d.ozonReviewId);
+      const existing = await tStorage(reqTenantId(req)).getReviewByOzonId(d.ozonReviewId);
       if (!existing) {
-        await storage.createReview(d);
+        await tStorage(reqTenantId(req)).createReview(d);
         created++;
       }
     }
@@ -833,18 +935,18 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
   });
 
   // ── Generate AI response ───────────────────────────────────────────────────
-  app.post("/api/reviews/:id/generate", async (req, res) => {
-    const settings = await storage.getSettings();
+  app.post("/api/reviews/:id/generate", requireAuth, async (req, res) => {
+    const settings = await tStorage(reqTenantId(req)).getSettings();
     const { apiKey, provider } = getActiveApiKey(settings);
     if (!apiKey) {
       return res.status(400).json({ error: "Настройте API ключ выбранного провайдера в разделе Настройки" });
     }
 
-    const review = await storage.getReviewById(Number(req.params.id));
+    const review = await tStorage(reqTenantId(req)).getReviewById(Number(req.params.id));
     if (!review) return res.status(404).json({ error: "Отзыв не найден" });
 
     try {
-      await storage.updateReviewStatus(review.id, "generating");
+      await tStorage(reqTenantId(req)).updateReviewStatus(review.id, "generating");
 
       const responseText = await generateAiResponse({
         productName: review.productName,
@@ -857,15 +959,15 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       });
 
       // Create or update response
-      const existingResponse = await storage.getResponseByReviewId(review.id);
+      const existingResponse = await tStorage(reqTenantId(req)).getResponseByReviewId(review.id);
       let savedResponse;
       if (existingResponse) {
-        savedResponse = await storage.updateResponse(existingResponse.id, {
+        savedResponse = await tStorage(reqTenantId(req)).updateResponse(existingResponse.id, {
           responseText,
           aiGenerated: true,
         });
       } else {
-        savedResponse = await storage.createResponse({
+        savedResponse = await tStorage(reqTenantId(req)).createResponse({
           reviewId: review.id,
           responseText,
           aiGenerated: true,
@@ -875,27 +977,27 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
         });
       }
 
-      await storage.updateReviewStatus(review.id, "pending_approval");
+      await tStorage(reqTenantId(req)).updateReviewStatus(review.id, "pending_approval");
 
       // Sheet is written only at publish time (not at generate time)
 
-      const updated = await storage.getReviewById(review.id);
+      const updated = await tStorage(reqTenantId(req)).getReviewById(review.id);
       res.json(updated);
     } catch (e: unknown) {
-      await storage.updateReviewStatus(review.id, "new");
+      await tStorage(reqTenantId(req)).updateReviewStatus(review.id, "new");
       res.status(500).json({ error: String(e) });
     }
   });
 
   // ── Generate all pending ──────────────────────────────────────────────────
-  app.post("/api/reviews/generate-all", async (_req, res) => {
-    const settings = await storage.getSettings();
+  app.post("/api/reviews/generate-all", requireAuth, async (req, res) => {
+    const settings = await tStorage(reqTenantId(req)).getSettings();
     const { apiKey: allApiKey, provider: allProvider } = getActiveApiKey(settings);
     if (!allApiKey) {
       return res.status(400).json({ error: "Настройте API ключ выбранного провайдера" });
     }
 
-    const reviews = await storage.getReviews();
+    const reviews = await tStorage(reqTenantId(req)).getReviews();
     // Exclude auto-publishable reviews (4-5★ with no text) — they go through auto-publish queue
     const isAutoPublishable = (r: typeof reviews[0]) =>
       r.rating >= 4 && (r.reviewText ?? "").trim() === "";
@@ -904,7 +1006,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
 
     for (const review of toProcess) {
       try {
-        await storage.updateReviewStatus(review.id, "generating");
+        await tStorage(reqTenantId(req)).updateReviewStatus(review.id, "generating");
         const responseText = await generateAiResponse({
           productName: review.productName,
           authorName: review.authorName,
@@ -915,15 +1017,15 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
           provider: allProvider,
         });
 
-        const existingResponse = await storage.getResponseByReviewId(review.id);
+        const existingResponse = await tStorage(reqTenantId(req)).getResponseByReviewId(review.id);
         let savedResponse;
         if (existingResponse) {
-          savedResponse = await storage.updateResponse(existingResponse.id, {
+          savedResponse = await tStorage(reqTenantId(req)).updateResponse(existingResponse.id, {
             responseText,
             aiGenerated: true,
           });
         } else {
-          savedResponse = await storage.createResponse({
+          savedResponse = await tStorage(reqTenantId(req)).createResponse({
             reviewId: review.id,
             responseText,
             aiGenerated: true,
@@ -933,13 +1035,13 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
           });
         }
 
-        await storage.updateReviewStatus(review.id, "pending_approval");
+        await tStorage(reqTenantId(req)).updateReviewStatus(review.id, "pending_approval");
 
         // Sheet is written only at publish time (not at generate time)
         processed++;
       } catch (e) {
         console.error(`Error generating for review ${review.id}:`, e);
-        await storage.updateReviewStatus(review.id, "new");
+        await tStorage(reqTenantId(req)).updateReviewStatus(review.id, "new");
       }
     }
 
@@ -947,19 +1049,19 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
   });
 
   // ── Update response text ───────────────────────────────────────────────────
-  app.patch("/api/reviews/:id/response", async (req, res) => {
-    const review = await storage.getReviewById(Number(req.params.id));
+  app.patch("/api/reviews/:id/response", requireAuth, async (req, res) => {
+    const review = await tStorage(reqTenantId(req)).getReviewById(Number(req.params.id));
     if (!review) return res.status(404).json({ error: "Not found" });
 
     const { responseText } = req.body;
     if (!responseText) return res.status(400).json({ error: "responseText required" });
 
     try {
-      const existingResponse = await storage.getResponseByReviewId(review.id);
+      const existingResponse = await tStorage(reqTenantId(req)).getResponseByReviewId(review.id);
       if (existingResponse) {
-        await storage.updateResponse(existingResponse.id, { responseText });
+        await tStorage(reqTenantId(req)).updateResponse(existingResponse.id, { responseText });
       } else {
-        await storage.createResponse({
+        await tStorage(reqTenantId(req)).createResponse({
           reviewId: review.id,
           responseText,
           aiGenerated: false,
@@ -968,7 +1070,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
           publishedAt: null,
         });
       }
-      const updated = await storage.getReviewById(review.id);
+      const updated = await tStorage(reqTenantId(req)).getReviewById(review.id);
       res.json(updated);
     } catch (e: unknown) {
       res.status(500).json({ error: String(e) });
@@ -976,9 +1078,9 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
   });
 
   // ── Approve = publish immediately to Ozon ──────────────────────────────────
-  app.post("/api/reviews/:id/approve", async (req, res) => {
-    const settings = await storage.getSettings();
-    const review = await storage.getReviewById(Number(req.params.id));
+  app.post("/api/reviews/:id/approve", requireAuth, async (req, res) => {
+    const settings = await tStorage(reqTenantId(req)).getSettings();
+    const review = await tStorage(reqTenantId(req)).getReviewById(Number(req.params.id));
     if (!review) return res.status(404).json({ error: "Not found" });
 
     const response = review.response;
@@ -995,11 +1097,11 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
         review.ozonReviewId,
         response.responseText
       );
-      await storage.updateResponse(response.id, { approvedAt: now, publishedAt: now });
-      await storage.updateReviewStatus(review.id, "published");
+      await tStorage(reqTenantId(req)).updateResponse(response.id, { approvedAt: now, publishedAt: now });
+      await tStorage(reqTenantId(req)).updateReviewStatus(review.id, "published");
       markPublishedId(review.ozonReviewId);
       // Record to persistent history
-      storage.recordPublishHistory({
+      tStorage(reqTenantId(req)).recordPublishHistory({
         ozonReviewId: review.ozonReviewId,
         ozonSku: review.ozonSku ?? review.productId ?? "",
         productName: review.productName,
@@ -1012,30 +1114,30 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
         publishedAt: now.toISOString(),
       });
 
-      const updated = await storage.getReviewById(review.id);
+      const updated = await tStorage(reqTenantId(req)).getReviewById(review.id);
       res.json(updated);
     } catch (e: unknown) {
       res.status(500).json({ error: String(e) });
     }
   });
-  app.post("/api/reviews/:id/reject", async (req, res) => {
-    const review = await storage.getReviewById(Number(req.params.id));
+  app.post("/api/reviews/:id/reject", requireAuth, async (req, res) => {
+    const review = await tStorage(reqTenantId(req)).getReviewById(Number(req.params.id));
     if (!review) return res.status(404).json({ error: "Not found" });
 
-    await storage.updateReviewStatus(review.id, "rejected");
+    await tStorage(reqTenantId(req)).updateReviewStatus(review.id, "rejected");
 
-    const updated = await storage.getReviewById(review.id);
+    const updated = await tStorage(reqTenantId(req)).getReviewById(review.id);
     res.json(updated);
   });
 
   // ── Publish all approved reviews ────────────────────────────────────────────
-  app.post("/api/reviews/publish-all-approved", async (_req, res) => {
-    const settings = await storage.getSettings();
+  app.post("/api/reviews/publish-all-approved", requireAuth, async (req, res) => {
+    const settings = await tStorage(reqTenantId(req)).getSettings();
     if (!settings?.ozonClientId || !settings?.ozonApiKey) {
       return res.status(400).json({ error: "Настройте Ozon API ключи" });
     }
 
-    const reviews = await storage.getReviews();
+    const reviews = await tStorage(reqTenantId(req)).getReviews();
     const approved = reviews.filter((r) => r.status === "approved");
     let published = 0;
     const errors: string[] = [];
@@ -1049,10 +1151,10 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
           review.ozonReviewId,
           review.response.responseText
         );
-        await storage.updateResponse(review.response.id, { publishedAt: new Date() });
-        await storage.updateReviewStatus(review.id, "published");
+        await tStorage(reqTenantId(req)).updateResponse(review.response.id, { publishedAt: new Date() });
+        await tStorage(reqTenantId(req)).updateReviewStatus(review.id, "published");
         markPublishedId(review.ozonReviewId);
-        storage.recordPublishHistory({
+        tStorage(reqTenantId(req)).recordPublishHistory({
           ozonReviewId: review.ozonReviewId,
           ozonSku: review.ozonSku ?? review.productId ?? "",
           productName: review.productName,
@@ -1073,13 +1175,13 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
   });
 
   // ── Publish to Ozon manually ───────────────────────────────────────────────
-  app.post("/api/reviews/:id/publish", async (req, res) => {
-    const settings = await storage.getSettings();
+  app.post("/api/reviews/:id/publish", requireAuth, async (req, res) => {
+    const settings = await tStorage(reqTenantId(req)).getSettings();
     if (!settings?.ozonClientId || !settings?.ozonApiKey) {
       return res.status(400).json({ error: "Настройте Ozon API ключи" });
     }
 
-    const review = await storage.getReviewById(Number(req.params.id));
+    const review = await tStorage(reqTenantId(req)).getReviewById(Number(req.params.id));
     if (!review) return res.status(404).json({ error: "Not found" });
     if (!review.response?.responseText) {
       return res.status(400).json({ error: "Нет текста ответа" });
@@ -1092,10 +1194,10 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
         review.ozonReviewId,
         review.response.responseText
       );
-      await storage.updateResponse(review.response.id, { publishedAt: new Date() });
-      await storage.updateReviewStatus(review.id, "published");
+      await tStorage(reqTenantId(req)).updateResponse(review.response.id, { publishedAt: new Date() });
+      await tStorage(reqTenantId(req)).updateReviewStatus(review.id, "published");
       markPublishedId(review.ozonReviewId);
-      storage.recordPublishHistory({
+      tStorage(reqTenantId(req)).recordPublishHistory({
         ozonReviewId: review.ozonReviewId,
         ozonSku: review.ozonSku ?? review.productId ?? "",
         productName: review.productName,
@@ -1106,7 +1208,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
         autoPublished: false,
         publishedAt: new Date().toISOString(),
       });
-      const updated = await storage.getReviewById(review.id);
+      const updated = await tStorage(reqTenantId(req)).getReviewById(review.id);
       res.json(updated);
     } catch (e: unknown) {
       res.status(500).json({ error: String(e) });
@@ -1115,7 +1217,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
 
   // ── Export to Excel ────────────────────────────────────────────────────────────────
   // GET /api/export/excel?from=YYYY-MM-DD&to=YYYY-MM-DD
-  app.get("/api/export/excel", async (req, res) => {
+  app.get("/api/export/excel", requireAuth, async (req, res) => {
     try {
       const { from, to } = req.query as Record<string, string>;
 
@@ -1131,7 +1233,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
         toISO = d.toISOString();
       }
 
-      const rows = storage.getPublishHistory(fromISO, toISO);
+      const rows = tStorage(reqTenantId(req)).getPublishHistory(fromISO, toISO);
 
       const ExcelJSModule = await import("exceljs");
       const ExcelJS = (ExcelJSModule as any).default ?? ExcelJSModule;
@@ -1262,7 +1364,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       const filters: { status?: string; productId?: string } = {};
       if (status && status !== "all" && status !== "undefined") filters.status = status;
       if (product_id && product_id !== "undefined") filters.productId = product_id;
-      const questions = await (storage as any).getQuestions(filters);
+      const questions = await tStorage(reqTenantId(req)).getQuestions(filters);
       res.json(questions);
     } catch (e) {
       res.status(500).json({ error: String(e) });
@@ -1272,7 +1374,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
   // POST /api/questions/sync — синхронизация вопросов с Ozon
   app.post("/api/questions/sync", requireAuth, async (req, res) => {
     try {
-      const settings = await storage.getSettings();
+      const settings = await tStorage(reqTenantId(req)).getSettings();
       const questionApiKey = settings?.questionApiKey || settings?.ozonApiKey;
       if (!settings?.ozonClientId || !questionApiKey) {
         res.status(400).json({ error: "Не настроен API ключ для вопросов. Добавьте Question API Key в настройках." });
@@ -1292,19 +1394,19 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
         if (!result.questions.length) break;
 
         for (const q of result.questions) {
-          const existing = await (storage as any).getQuestionByOzonId(q.question_id);
+          const existing = await tStorage(reqTenantId(req)).getQuestionByOzonId(q.question_id);
 
           if (existing) {
             // If already in DB but now answered — update status and save Ozon answer
             if (q.is_answered && existing.status === "new") {
-              await (storage as any).updateQuestionStatus(existing.id, "published", { isAnswered: true });
+              await tStorage(reqTenantId(req)).updateQuestionStatus(existing.id, "published", { isAnswered: true });
               // Load and save Ozon's original answer as knowledge base
               try {
                 const answers = await fetchOzonQuestionAnswers(settings.ozonClientId, questionApiKey, q.question_id);
                 if (answers.length > 0) {
-                  const existingResp = await (storage as any).getQuestionResponseByQuestionId(existing.id);
+                  const existingResp = await tStorage(reqTenantId(req)).getQuestionResponseByQuestionId(existing.id);
                   if (!existingResp) {
-                    await (storage as any).createQuestionResponse({
+                    await tStorage(reqTenantId(req)).createQuestionResponse({
                       questionId: existing.id,
                       responseText: answers[0].answerText,
                       originalAiText: answers[0].answerText,
@@ -1318,7 +1420,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
             continue;
           }
 
-          const savedQ = await (storage as any).createQuestion({
+          const savedQ = await tStorage(reqTenantId(req)).createQuestion({
             ozonQuestionId: q.question_id,
             productId: q.product_id,
             productName: q.product_name,
@@ -1338,7 +1440,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
             try {
               const answers = await fetchOzonQuestionAnswers(settings.ozonClientId, questionApiKey, q.question_id);
               if (answers.length > 0) {
-                await (storage as any).createQuestionResponse({
+                await tStorage(reqTenantId(req)).createQuestionResponse({
                   questionId: savedQ.id,
                   responseText: answers[0].answerText,
                   originalAiText: answers[0].answerText,
@@ -1366,7 +1468,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
   // POST /api/products/sync-info — загрузить описания товаров из Ozon по всем SKU в базе
   app.post("/api/products/sync-info", requireAuth, async (_req, res) => {
     try {
-      const settings = await storage.getSettings();
+      const settings = await tStorage(reqTenantId(req)).getSettings();
       const productApiKey = (settings as any)?.productApiKey || settings?.ozonApiKey;
       if (!settings?.ozonClientId || !productApiKey) {
         res.status(400).json({ error: "Не настроен Product API Key. Добавьте ключ с ролью Products в Настройках." });
@@ -1383,7 +1485,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
         allSkus = skuRows.rows.map((r: any) => r.ozon_sku).filter(Boolean);
       } catch {
         // Fallback: get from questions list
-        const qs = await (storage as any).getQuestions?.({}) ?? [];
+        const qs = await tStorage(reqTenantId(req)).getQuestions({}) ?? [];
         const skuSet = new Set<string>();
         for (const q of qs) { if (q.ozonSku && /^\d+$/.test(q.ozonSku)) skuSet.add(q.ozonSku); }
         allSkus = [...skuSet];
@@ -1441,7 +1543,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
   // POST /api/products/sync-catalog — загрузить весь ассортимент магазина из Ozon
   app.post("/api/products/sync-catalog", requireAuth, async (_req, res) => {
     try {
-      const settings = await storage.getSettings();
+      const settings = await tStorage(reqTenantId(req)).getSettings();
       const productApiKey = (settings as any)?.productApiKey || settings?.ozonApiKey;
       if (!settings?.ozonClientId || !productApiKey) {
         res.status(400).json({ error: "Не настроен Product API Key. Добавьте ключ с ролью Admin read only." });
@@ -1504,14 +1606,14 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
   app.post("/api/questions/:id/generate", requireAuth, async (req, res) => {
     const id = parseInt(req.params.id, 10);
     try {
-      const question = await (storage as any).getQuestionById(id);
+      const question = await tStorage(reqTenantId(req)).getQuestionById(id);
       if (!question) { res.status(404).json({ error: "Вопрос не найден" }); return; }
 
-      const settings = await storage.getSettings();
+      const settings = await tStorage(reqTenantId(req)).getSettings();
       const { apiKey, provider } = getActiveApiKey(settings);
       if (!apiKey) { res.status(400).json({ error: "Не настроен AI ключ" }); return; }
 
-      await (storage as any).updateQuestionStatus(id, "generating");
+      await tStorage(reqTenantId(req)).updateQuestionStatus(id, "generating");
 
       // Load product description from cache
       const productCache = question.ozonSku
@@ -1542,14 +1644,14 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
           provider,
         });
       } catch (e) {
-        await (storage as any).updateQuestionStatus(id, "new");
+        await tStorage(reqTenantId(req)).updateQuestionStatus(id, "new");
         throw e;
       }
 
       // Upsert response
-      const existing = await (storage as any).getQuestionResponseByQuestionId(id);
+      const existing = await tStorage(reqTenantId(req)).getQuestionResponseByQuestionId(id);
       if (existing) {
-        await (storage as any).updateQuestionResponse(existing.id, {
+        await tStorage(reqTenantId(req)).updateQuestionResponse(existing.id, {
           responseText: aiText,
           originalAiText: aiText,
           aiGenerated: true,
@@ -1557,7 +1659,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
           publishedAt: null,
         });
       } else {
-        await (storage as any).createQuestionResponse({
+        await tStorage(reqTenantId(req)).createQuestionResponse({
           questionId: id,
           responseText: aiText,
           originalAiText: aiText,
@@ -1565,8 +1667,8 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
         });
       }
 
-      await (storage as any).updateQuestionStatus(id, "pending_approval");
-      const updated = await (storage as any).getQuestionById(id);
+      await tStorage(reqTenantId(req)).updateQuestionStatus(id, "pending_approval");
+      const updated = await tStorage(reqTenantId(req)).getQuestionById(id);
       res.json(updated);
     } catch (e) {
       console.error("[questions/generate]", e);
@@ -1580,10 +1682,10 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     try {
       const { responseText } = req.body ?? {};
       if (!responseText) { res.status(400).json({ error: "Нет текста ответа" }); return; }
-      const existing = await (storage as any).getQuestionResponseByQuestionId(id);
+      const existing = await tStorage(reqTenantId(req)).getQuestionResponseByQuestionId(id);
       if (!existing) { res.status(404).json({ error: "Ответ не найден" }); return; }
-      await (storage as any).updateQuestionResponse(existing.id, { responseText });
-      const updated = await (storage as any).getQuestionById(id);
+      await tStorage(reqTenantId(req)).updateQuestionResponse(existing.id, { responseText });
+      const updated = await tStorage(reqTenantId(req)).getQuestionById(id);
       res.json(updated);
     } catch (e) {
       res.status(500).json({ error: String(e) });
@@ -1594,14 +1696,14 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
   app.post("/api/questions/:id/approve", requireAuth, async (req, res) => {
     const id = parseInt(req.params.id, 10);
     try {
-      const question = await (storage as any).getQuestionById(id);
+      const question = await tStorage(reqTenantId(req)).getQuestionById(id);
       if (!question) { res.status(404).json({ error: "Вопрос не найден" }); return; }
-      const resp = await (storage as any).getQuestionResponseByQuestionId(id);
+      const resp = await tStorage(reqTenantId(req)).getQuestionResponseByQuestionId(id);
       if (resp) {
-        await (storage as any).updateQuestionResponse(resp.id, { approvedAt: new Date().toISOString() });
+        await tStorage(reqTenantId(req)).updateQuestionResponse(resp.id, { approvedAt: new Date().toISOString() });
       }
-      await (storage as any).updateQuestionStatus(id, "approved");
-      const updated = await (storage as any).getQuestionById(id);
+      await tStorage(reqTenantId(req)).updateQuestionStatus(id, "approved");
+      const updated = await tStorage(reqTenantId(req)).getQuestionById(id);
       res.json(updated);
     } catch (e) {
       res.status(500).json({ error: String(e) });
@@ -1612,8 +1714,8 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
   app.post("/api/questions/:id/reject", requireAuth, async (req, res) => {
     const id = parseInt(req.params.id, 10);
     try {
-      await (storage as any).updateQuestionStatus(id, "rejected");
-      const updated = await (storage as any).getQuestionById(id);
+      await tStorage(reqTenantId(req)).updateQuestionStatus(id, "rejected");
+      const updated = await tStorage(reqTenantId(req)).getQuestionById(id);
       res.json(updated);
     } catch (e) {
       res.status(500).json({ error: String(e) });
@@ -1624,16 +1726,16 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
   app.post("/api/questions/:id/publish", requireAuth, async (req, res) => {
     const id = parseInt(req.params.id, 10);
     try {
-      const question = await (storage as any).getQuestionById(id);
+      const question = await tStorage(reqTenantId(req)).getQuestionById(id);
       if (!question) { res.status(404).json({ error: "Вопрос не найден" }); return; }
 
-      const resp = await (storage as any).getQuestionResponseByQuestionId(id);
+      const resp = await tStorage(reqTenantId(req)).getQuestionResponseByQuestionId(id);
       if (!resp?.responseText) {
         res.status(400).json({ error: "Нет текста ответа для публикации" });
         return;
       }
 
-      const settings = await storage.getSettings();
+      const settings = await tStorage(reqTenantId(req)).getSettings();
       const questionApiKey = settings?.questionApiKey || settings?.ozonApiKey;
       if (!settings?.ozonClientId || !questionApiKey) {
         res.status(400).json({ error: "Не настроен API ключ для вопросов. Добавьте Question API Key в настройках." });
@@ -1648,9 +1750,9 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       );
 
       const now = new Date().toISOString();
-      await (storage as any).updateQuestionResponse(resp.id, { publishedAt: now });
-      await (storage as any).updateQuestionStatus(id, "published", { isAnswered: true, autoPublished: false });
-      const updated = await (storage as any).getQuestionById(id);
+      await tStorage(reqTenantId(req)).updateQuestionResponse(resp.id, { publishedAt: now });
+      await tStorage(reqTenantId(req)).updateQuestionStatus(id, "published", { isAnswered: true, autoPublished: false });
+      const updated = await tStorage(reqTenantId(req)).getQuestionById(id);
       res.json({ status: "published", question: updated });
     } catch (e) {
       console.error("[questions/publish]", e);

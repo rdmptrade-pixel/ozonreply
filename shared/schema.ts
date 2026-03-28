@@ -2,10 +2,27 @@ import { sqliteTable, text, integer } from "drizzle-orm/sqlite-core";
 import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod";
 
+// ── Tenants ───────────────────────────────────────────────────────────────────
+// plan: trial | paid | suspended
+// status: active | suspended
+export const tenants = sqliteTable("tenants", {
+  id:        integer("id").primaryKey({ autoIncrement: true }),
+  name:      text("name").notNull().default(""),
+  plan:      text("plan").notNull().default("trial"),   // trial | paid | suspended
+  status:    text("status").notNull().default("active"), // active | suspended
+  trialEndsAt: text("trial_ends_at"),
+  createdAt: text("created_at").notNull().default(""),
+});
+
+export const insertTenantSchema = createInsertSchema(tenants).omit({ id: true });
+export type InsertTenant = z.infer<typeof insertTenantSchema>;
+export type Tenant = typeof tenants.$inferSelect;
+
 // ── Reviews ──────────────────────────────────────────────────────────────────
 export const reviews = sqliteTable("reviews", {
   id:            integer("id").primaryKey({ autoIncrement: true }),
-  ozonReviewId:  text("ozon_review_id").notNull().unique(),
+  tenantId:      integer("tenant_id").notNull().default(1),
+  ozonReviewId:  text("ozon_review_id").notNull(),
   productId:     text("product_id").notNull(),
   productName:   text("product_name").notNull().default(""),
   authorName:    text("author_name").notNull().default(""),
@@ -30,6 +47,7 @@ export type Review = typeof reviews.$inferSelect;
 // ── Responses ─────────────────────────────────────────────────────────────────
 export const responses = sqliteTable("responses", {
   id:             integer("id").primaryKey({ autoIncrement: true }),
+  tenantId:       integer("tenant_id").notNull().default(1),
   reviewId:       integer("review_id").notNull(),
   responseText:   text("response_text").notNull().default(""),
   aiGenerated:    integer("ai_generated", { mode: "boolean" }).notNull().default(true),
@@ -53,7 +71,8 @@ export type ReviewWithResponse = Review & {
 // ── Questions ─────────────────────────────────────────────────────────────────
 export const questions = sqliteTable("questions", {
   id:            integer("id").primaryKey({ autoIncrement: true }),
-  ozonQuestionId: text("ozon_question_id").notNull().unique(),
+  tenantId:      integer("tenant_id").notNull().default(1),
+  ozonQuestionId: text("ozon_question_id").notNull(),
   productId:     text("product_id").notNull().default(""),
   productName:   text("product_name").notNull().default(""),
   ozonSku:       text("ozon_sku").notNull().default(""),
@@ -75,6 +94,7 @@ export type Question = typeof questions.$inferSelect;
 // ── Question Responses ────────────────────────────────────────────────────────
 export const questionResponses = sqliteTable("question_responses", {
   id:             integer("id").primaryKey({ autoIncrement: true }),
+  tenantId:       integer("tenant_id").notNull().default(1),
   questionId:     integer("question_id").notNull(),
   responseText:   text("response_text").notNull().default(""),
   originalAiText: text("original_ai_text").notNull().default(""),
@@ -93,8 +113,9 @@ export type QuestionWithResponse = Question & {
   response?: QuestionResponse;
 };
 
-// ── Settings (kept in JSON file — unchanged) ──────────────────────────────────
-// Settings are still stored in data/settings.json via MemStorage
+// ── Settings (per-tenant) ─────────────────────────────────────────────────────
+// In SQLite mode: stored in data/settings-{tenantId}.json
+// In PG mode: stored in settings table with tenant_id column
 export interface InsertSettings {
   ozonClientId: string;
   ozonApiKey: string;
@@ -110,7 +131,7 @@ export interface InsertSettings {
   autoPublish: boolean;
   syncInterval: number;
 }
-export type Settings = InsertSettings & { id: number };
+export type Settings = InsertSettings & { id: number; tenantId?: number };
 
 // ── Product Cache (описания товаров из Ozon, по SKU) ──────────────────────────
 export interface ProductCache {

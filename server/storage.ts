@@ -1,6 +1,6 @@
 import {
-  type Review, type Response, type Settings,
-  type InsertReview, type InsertResponse, type InsertSettings,
+  type Review, type Response, type Settings, type Tenant,
+  type InsertReview, type InsertResponse, type InsertSettings, type InsertTenant,
   type ReviewWithResponse,
   type Question, type QuestionResponse, type QuestionWithResponse,
   type InsertQuestion, type InsertQuestionResponse,
@@ -8,10 +8,16 @@ import {
   responses as responsesTable,
   questions as questionsTable,
   questionResponses as questionResponsesTable,
+  tenants as tenantsTable,
 } from "@shared/schema";
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from "fs";
 import { join } from "path";
-import { eq, sql } from "drizzle-orm";
+import { eq, sql, and } from "drizzle-orm";
+import { createRequire } from "module";
+// Works in both ESM (tsx dev) and CJS (esbuild prod bundle)
+const _require = typeof require !== "undefined"
+  ? require
+  : createRequire(/* @vite-ignore */ import.meta.url);
 
 const DATA_DIR = join(process.cwd(), "data");
 const SETTINGS_FILE = join(DATA_DIR, "settings.json");
@@ -23,6 +29,14 @@ function ensureDataDir() {
   if (!existsSync(DATA_DIR)) mkdirSync(DATA_DIR, { recursive: true });
 }
 
+// Settings per-tenant: data/settings-{tenantId}.json
+function getSettingsFile(tenantId?: number): string {
+  if (tenantId && tenantId !== 1) {
+    return join(DATA_DIR, `settings-${tenantId}.json`);
+  }
+  return SETTINGS_FILE;
+}
+
 // ── SQLite setup (lazy — only initialized when DATABASE_URL is NOT set) ────────
 let _sqlite: any = null;
 let _db: any = null;
@@ -30,20 +44,35 @@ let _db: any = null;
 function getSqlite() {
   if (!_sqlite) {
     // eslint-disable-next-line @typescript-eslint/no-require-imports
-    const Database = require("better-sqlite3");
+    const Database = _require("better-sqlite3");
     ensureDataDir();
     _sqlite = new Database(DB_SQLITE_FILE);
     _sqlite.pragma("journal_mode = WAL");
     _sqlite.pragma("synchronous = NORMAL");
 
-    const { drizzle } = require("drizzle-orm/better-sqlite3");
+    const { drizzle } = _require("drizzle-orm/better-sqlite3");
     _db = drizzle(_sqlite);
 
     // Create tables if they don't exist
     _sqlite.exec(`
+      -- Tenants table
+      CREATE TABLE IF NOT EXISTS tenants (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        name TEXT NOT NULL DEFAULT '',
+        plan TEXT NOT NULL DEFAULT 'trial',
+        status TEXT NOT NULL DEFAULT 'active',
+        trial_ends_at TEXT,
+        created_at TEXT NOT NULL DEFAULT ''
+      );
+
+      -- Insert default tenant (id=1) for backward compat if not exists
+      INSERT OR IGNORE INTO tenants (id, name, plan, status, created_at)
+      VALUES (1, 'Default', 'paid', 'active', '${new Date().toISOString()}');
+
       CREATE TABLE IF NOT EXISTS reviews (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
-        ozon_review_id TEXT NOT NULL UNIQUE,
+        tenant_id INTEGER NOT NULL DEFAULT 1,
+        ozon_review_id TEXT NOT NULL,
         product_id TEXT NOT NULL,
         product_name TEXT NOT NULL DEFAULT '',
         author_name TEXT NOT NULL DEFAULT '',
@@ -62,6 +91,7 @@ function getSqlite() {
 
       CREATE TABLE IF NOT EXISTS responses (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
+        tenant_id INTEGER NOT NULL DEFAULT 1,
         review_id INTEGER NOT NULL,
         response_text TEXT NOT NULL DEFAULT '',
         ai_generated INTEGER NOT NULL DEFAULT 1,
@@ -73,13 +103,16 @@ function getSqlite() {
         updated_at TEXT NOT NULL DEFAULT ''
       );
 
+      CREATE INDEX IF NOT EXISTS idx_reviews_tenant ON reviews(tenant_id);
       CREATE INDEX IF NOT EXISTS idx_reviews_ozon_id ON reviews(ozon_review_id);
       CREATE INDEX IF NOT EXISTS idx_reviews_status ON reviews(status);
       CREATE INDEX IF NOT EXISTS idx_responses_review_id ON responses(review_id);
+      CREATE INDEX IF NOT EXISTS idx_responses_tenant ON responses(tenant_id);
 
       -- History of all published responses (persists across clearAllData)
       CREATE TABLE IF NOT EXISTS publish_history (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
+        tenant_id INTEGER NOT NULL DEFAULT 1,
         ozon_review_id TEXT NOT NULL,
         ozon_sku TEXT NOT NULL DEFAULT '',
         product_name TEXT NOT NULL DEFAULT '',
@@ -93,11 +126,13 @@ function getSqlite() {
       );
       CREATE INDEX IF NOT EXISTS idx_publish_history_published_at ON publish_history(published_at);
       CREATE INDEX IF NOT EXISTS idx_publish_history_ozon_id ON publish_history(ozon_review_id);
+      CREATE INDEX IF NOT EXISTS idx_publish_history_tenant ON publish_history(tenant_id);
 
       -- Questions module
       CREATE TABLE IF NOT EXISTS questions (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
-        ozon_question_id TEXT NOT NULL UNIQUE,
+        tenant_id INTEGER NOT NULL DEFAULT 1,
+        ozon_question_id TEXT NOT NULL,
         product_id TEXT NOT NULL DEFAULT '',
         product_name TEXT NOT NULL DEFAULT '',
         ozon_sku TEXT NOT NULL DEFAULT '',
@@ -113,6 +148,7 @@ function getSqlite() {
 
       CREATE TABLE IF NOT EXISTS question_responses (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
+        tenant_id INTEGER NOT NULL DEFAULT 1,
         question_id INTEGER NOT NULL,
         response_text TEXT NOT NULL DEFAULT '',
         original_ai_text TEXT NOT NULL DEFAULT '',
@@ -125,11 +161,20 @@ function getSqlite() {
 
       CREATE INDEX IF NOT EXISTS idx_questions_ozon_id ON questions(ozon_question_id);
       CREATE INDEX IF NOT EXISTS idx_questions_status ON questions(status);
+      CREATE INDEX IF NOT EXISTS idx_questions_tenant ON questions(tenant_id);
       CREATE INDEX IF NOT EXISTS idx_question_responses_question_id ON question_responses(question_id);
+      CREATE INDEX IF NOT EXISTS idx_question_responses_tenant ON question_responses(tenant_id);
     `);
 
     // Migrations (run once, idempotent)
     try { _sqlite.exec("ALTER TABLE publish_history ADD COLUMN original_ai_text TEXT NOT NULL DEFAULT ''"); } catch {}
+    try { _sqlite.exec("ALTER TABLE reviews ADD COLUMN tenant_id INTEGER NOT NULL DEFAULT 1"); } catch {}
+    try { _sqlite.exec("ALTER TABLE responses ADD COLUMN tenant_id INTEGER NOT NULL DEFAULT 1"); } catch {}
+    try { _sqlite.exec("ALTER TABLE questions ADD COLUMN tenant_id INTEGER NOT NULL DEFAULT 1"); } catch {}
+    try { _sqlite.exec("ALTER TABLE question_responses ADD COLUMN tenant_id INTEGER NOT NULL DEFAULT 1"); } catch {}
+    try { _sqlite.exec("ALTER TABLE publish_history ADD COLUMN tenant_id INTEGER NOT NULL DEFAULT 1"); } catch {}
+    // Remove unique constraint on ozon_review_id (now unique per tenant, not globally)
+    // SQLite doesn't support DROP CONSTRAINT, but we recreate with index if needed
   }
   return { sqlite: _sqlite, db: _db };
 }
@@ -139,7 +184,7 @@ function now(): string {
   return new Date().toISOString();
 }
 
-function rowToReview(row: typeof reviewsTable.$inferSelect): Review {
+function rowToReview(row: any): Review {
   return {
     ...row,
     hasPhotos: Boolean(row.hasPhotos),
@@ -148,7 +193,7 @@ function rowToReview(row: typeof reviewsTable.$inferSelect): Review {
   };
 }
 
-function rowToResponse(row: typeof responsesTable.$inferSelect): Response {
+function rowToResponse(row: any): Response {
   return {
     ...row,
     aiGenerated: Boolean(row.aiGenerated),
@@ -179,48 +224,108 @@ export function markPublishedId(ozonReviewId: string): void {
 
 // ── Storage interface ──────────────────────────────────────────────────────────
 export interface IStorage {
-  getSettings(): Promise<Settings | null>;
-  upsertSettings(data: InsertSettings): Promise<Settings>;
-  getReviews(filters?: { status?: string; rating?: number }): Promise<ReviewWithResponse[]>;
-  getReviewById(id: number): Promise<ReviewWithResponse | null>;
-  getReviewByOzonId(ozonReviewId: string): Promise<ReviewWithResponse | null>;
+  // Tenants
+  getTenants(): Promise<Tenant[]>;
+  getTenantById(id: number): Promise<Tenant | null>;
+  createTenant(data: InsertTenant): Promise<Tenant>;
+  updateTenant(id: number, data: Partial<Tenant>): Promise<Tenant>;
+
+  // Settings (per-tenant)
+  getSettings(tenantId?: number): Promise<Settings | null>;
+  upsertSettings(data: InsertSettings, tenantId?: number): Promise<Settings>;
+
+  // Reviews
+  getReviews(tenantId: number, filters?: { status?: string; rating?: number }): Promise<ReviewWithResponse[]>;
+  getReviewById(id: number, tenantId: number): Promise<ReviewWithResponse | null>;
+  getReviewByOzonId(ozonReviewId: string, tenantId: number): Promise<ReviewWithResponse | null>;
   createReview(data: InsertReview): Promise<Review>;
   updateReviewStatus(id: number, status: string, extra?: Record<string, unknown>): Promise<Review>;
   getResponseByReviewId(reviewId: number): Promise<Response | null>;
   createResponse(data: InsertResponse): Promise<Response>;
   updateResponse(id: number, data: Partial<InsertResponse & { originalAiText?: string }>): Promise<Response>;
-  getStats(): Promise<{ total: number; new: number; pendingApproval: number; approved: number; published: number; rejected: number; autoPublished: number }>;
-  clearAllData(): Promise<void>;
+  getStats(tenantId: number): Promise<{ total: number; new: number; pendingApproval: number; approved: number; published: number; rejected: number; autoPublished: number }>;
+  clearAllData(tenantId?: number): Promise<void>;
+
   // Questions
-  getQuestions(filters?: { status?: string; productId?: string }): Promise<QuestionWithResponse[]>;
-  getQuestionById(id: number): Promise<QuestionWithResponse | null>;
-  getQuestionByOzonId(ozonQuestionId: string): Promise<QuestionWithResponse | null>;
+  getQuestions(tenantId: number, filters?: { status?: string; productId?: string }): Promise<QuestionWithResponse[]>;
+  getQuestionById(id: number, tenantId: number): Promise<QuestionWithResponse | null>;
+  getQuestionByOzonId(ozonQuestionId: string, tenantId: number): Promise<QuestionWithResponse | null>;
   createQuestion(data: InsertQuestion): Promise<Question>;
   updateQuestionStatus(id: number, status: string, extra?: Record<string, unknown>): Promise<Question>;
   getQuestionResponseByQuestionId(questionId: number): Promise<QuestionResponse | null>;
   createQuestionResponse(data: InsertQuestionResponse): Promise<QuestionResponse>;
   updateQuestionResponse(id: number, data: Partial<InsertQuestionResponse & { originalAiText?: string }>): Promise<QuestionResponse>;
-  getQuestionStats(): Promise<{ total: number; new: number; pendingApproval: number; approved: number; published: number; rejected: number }>;
+  getQuestionStats(tenantId: number): Promise<{ total: number; new: number; pendingApproval: number; approved: number; published: number; rejected: number }>;
 }
 
 // ── Implementation ─────────────────────────────────────────────────────────────
 class SqliteStorage implements IStorage {
 
+  // ── Tenants ───────────────────────────────────────────────────────────────
+  async getTenants(): Promise<Tenant[]> {
+    const { sqlite } = getSqlite();
+    const rows = sqlite.prepare("SELECT * FROM tenants ORDER BY created_at DESC").all();
+    return rows as Tenant[];
+  }
+
+  async getTenantById(id: number): Promise<Tenant | null> {
+    const { sqlite } = getSqlite();
+    const row = sqlite.prepare("SELECT * FROM tenants WHERE id = ?").get(id);
+    return row as Tenant | null;
+  }
+
+  async createTenant(data: InsertTenant): Promise<Tenant> {
+    const { sqlite } = getSqlite();
+    const ts = now();
+    const trialEndsAt = new Date(Date.now() + 14 * 24 * 60 * 60 * 1000).toISOString();
+    const result = sqlite.prepare(
+      "INSERT INTO tenants (name, plan, status, trial_ends_at, created_at) VALUES (?, ?, ?, ?, ?)"
+    ).run(
+      data.name ?? "",
+      data.plan ?? "trial",
+      data.status ?? "active",
+      data.trialEndsAt ?? trialEndsAt,
+      ts
+    );
+    return { id: result.lastInsertRowid as number, name: data.name ?? "", plan: data.plan ?? "trial", status: data.status ?? "active", trialEndsAt: data.trialEndsAt ?? trialEndsAt, createdAt: ts };
+  }
+
+  async updateTenant(id: number, data: Partial<Tenant>): Promise<Tenant> {
+    const { sqlite } = getSqlite();
+    const fields: string[] = [];
+    const values: any[] = [];
+    for (const [k, v] of Object.entries(data)) {
+      const col = k.replace(/([A-Z])/g, "_$1").toLowerCase();
+      fields.push(`${col} = ?`);
+      values.push(v);
+    }
+    values.push(id);
+    if (fields.length > 0) {
+      sqlite.prepare(`UPDATE tenants SET ${fields.join(", ")} WHERE id = ?`).run(...values);
+    }
+    const row = sqlite.prepare("SELECT * FROM tenants WHERE id = ?").get(id);
+    return row as Tenant;
+  }
+
   // ── Settings ──────────────────────────────────────────────────────────────
-  async getSettings(): Promise<Settings | null> {
+  async getSettings(tenantId?: number): Promise<Settings | null> {
+    const tid = tenantId ?? 1;
+    const file = getSettingsFile(tid);
     try {
-      if (existsSync(SETTINGS_FILE)) {
-        const raw = JSON.parse(readFileSync(SETTINGS_FILE, "utf-8"));
-        return { id: 1, ...raw } as Settings;
+      if (existsSync(file)) {
+        const raw = JSON.parse(readFileSync(file, "utf-8"));
+        return { id: 1, tenantId: tid, ...raw } as Settings;
       }
     } catch {}
     return null;
   }
 
-  async upsertSettings(data: InsertSettings): Promise<Settings> {
+  async upsertSettings(data: InsertSettings, tenantId?: number): Promise<Settings> {
+    const tid = tenantId ?? 1;
     ensureDataDir();
-    writeFileSync(SETTINGS_FILE, JSON.stringify(data, null, 2), "utf-8");
-    return { id: 1, ...data };
+    const file = getSettingsFile(tid);
+    writeFileSync(file, JSON.stringify(data, null, 2), "utf-8");
+    return { id: 1, tenantId: tid, ...data };
   }
 
   // ── Reviews ───────────────────────────────────────────────────────────────
@@ -234,48 +339,59 @@ class SqliteStorage implements IStorage {
       : review;
   }
 
-  async getReviews(filters?: { status?: string; rating?: number }): Promise<ReviewWithResponse[]> {
-    const { db } = getSqlite();
-    const query = db.select().from(reviewsTable);
-    const rows = query.orderBy(sql`${reviewsTable.createdAt} DESC`).all();
+  async getReviews(tenantId: number, filters?: { status?: string; rating?: number }): Promise<ReviewWithResponse[]> {
+    const { sqlite } = getSqlite();
+    const rows = sqlite.prepare(`
+      SELECT * FROM reviews WHERE tenant_id = ? ORDER BY created_at DESC
+    `).all(tenantId);
     const result = rows
       .map(rowToReview)
-      .filter(r => {
+      .filter((r: Review) => {
         if (filters?.status && r.status !== filters.status) return false;
         if (filters?.rating && r.rating !== filters.rating) return false;
         return true;
       });
-    return result.map(r => this.attachResponse(r));
+    return result.map((r: Review) => this.attachResponse(r));
   }
 
-  async getReviewById(id: number): Promise<ReviewWithResponse | null> {
-    const { db } = getSqlite();
-    const row = db.select().from(reviewsTable).where(eq(reviewsTable.id, id)).get();
+  async getReviewById(id: number, tenantId: number): Promise<ReviewWithResponse | null> {
+    const { sqlite } = getSqlite();
+    const row = sqlite.prepare("SELECT * FROM reviews WHERE id = ? AND tenant_id = ?").get(id, tenantId);
     if (!row) return null;
     return this.attachResponse(rowToReview(row));
   }
 
-  async getReviewByOzonId(ozonReviewId: string): Promise<ReviewWithResponse | null> {
-    const { db } = getSqlite();
-    const row = db.select().from(reviewsTable)
-      .where(eq(reviewsTable.ozonReviewId, ozonReviewId))
-      .get();
+  async getReviewByOzonId(ozonReviewId: string, tenantId: number): Promise<ReviewWithResponse | null> {
+    const { sqlite } = getSqlite();
+    const row = sqlite.prepare("SELECT * FROM reviews WHERE ozon_review_id = ? AND tenant_id = ?").get(ozonReviewId, tenantId);
     if (!row) return null;
     return this.attachResponse(rowToReview(row));
   }
 
   async createReview(data: InsertReview): Promise<Review> {
-    const { db } = getSqlite();
+    const { sqlite } = getSqlite();
     const ts = now();
-    const row = db.insert(reviewsTable).values({
-      ...data,
-      // SQLite stores booleans as 0/1
-      hasPhotos: data.hasPhotos ? 1 : 0,
-      isAnswered: data.isAnswered ? 1 : 0,
-      autoPublished: (data as any).autoPublished ? 1 : 0,
-      createdAt: ts,
-      updatedAt: ts,
-    } as any).returning().get();
+    const result = sqlite.prepare(`
+      INSERT INTO reviews (tenant_id, ozon_review_id, product_id, product_name, author_name, rating, review_text, review_date, has_photos, status, ozon_sku, ozon_status, is_answered, auto_published, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      (data as any).tenantId ?? 1,
+      data.ozonReviewId,
+      data.productId,
+      data.productName ?? "",
+      data.authorName ?? "",
+      data.rating ?? 5,
+      data.reviewText ?? "",
+      data.reviewDate ?? "",
+      data.hasPhotos ? 1 : 0,
+      data.status ?? "new",
+      data.ozonSku ?? "",
+      data.ozonStatus ?? "",
+      data.isAnswered ? 1 : 0,
+      (data as any).autoPublished ? 1 : 0,
+      ts, ts
+    );
+    const row = sqlite.prepare("SELECT * FROM reviews WHERE id = ?").get(result.lastInsertRowid);
     return rowToReview(row);
   }
 
@@ -305,16 +421,23 @@ class SqliteStorage implements IStorage {
   }
 
   async createResponse(data: InsertResponse): Promise<Response> {
-    const { db } = getSqlite();
+    const { sqlite } = getSqlite();
     const ts = now();
-    const row = db.insert(responsesTable).values({
-      ...data,
-      originalAiText: (data as any).originalAiText ?? data.responseText ?? "",
-      approvedAt: data.approvedAt instanceof Date ? data.approvedAt.toISOString() : (data.approvedAt ?? null),
-      publishedAt: data.publishedAt instanceof Date ? data.publishedAt.toISOString() : (data.publishedAt ?? null),
-      createdAt: ts,
-      updatedAt: ts,
-    }).returning().get();
+    const result = sqlite.prepare(`
+      INSERT INTO responses (tenant_id, review_id, response_text, ai_generated, sheets_row_id, original_ai_text, approved_at, published_at, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      (data as any).tenantId ?? 1,
+      data.reviewId,
+      data.responseText ?? "",
+      data.aiGenerated ? 1 : 0,
+      data.sheetsRowId ?? "",
+      (data as any).originalAiText ?? data.responseText ?? "",
+      data.approvedAt instanceof Date ? data.approvedAt.toISOString() : (data.approvedAt ?? null),
+      data.publishedAt instanceof Date ? data.publishedAt.toISOString() : (data.publishedAt ?? null),
+      ts, ts
+    );
+    const row = sqlite.prepare("SELECT * FROM responses WHERE id = ?").get(result.lastInsertRowid);
     return rowToResponse(row);
   }
 
@@ -335,22 +458,23 @@ class SqliteStorage implements IStorage {
   }
 
   // ── Stats ─────────────────────────────────────────────────────────────────
-  async getStats() {
-    const { db } = getSqlite();
-    const all = db.select().from(reviewsTable).all();
+  async getStats(tenantId: number) {
+    const { sqlite } = getSqlite();
+    const all = sqlite.prepare("SELECT * FROM reviews WHERE tenant_id = ?").all(tenantId);
     return {
       total: all.length,
-      new: all.filter(r => r.status === "new").length,
-      pendingApproval: all.filter(r => r.status === "pending_approval").length,
-      approved: all.filter(r => r.status === "approved").length,
-      published: all.filter(r => r.status === "published").length,
-      rejected: all.filter(r => r.status === "rejected").length,
-      autoPublished: all.filter(r => Boolean(r.autoPublished)).length,
+      new: all.filter((r: any) => r.status === "new").length,
+      pendingApproval: all.filter((r: any) => r.status === "pending_approval").length,
+      approved: all.filter((r: any) => r.status === "approved").length,
+      published: all.filter((r: any) => r.status === "published").length,
+      rejected: all.filter((r: any) => r.status === "rejected").length,
+      autoPublished: all.filter((r: any) => Boolean(r.auto_published)).length,
     };
   }
 
   // ── Publish history ────────────────────────────────────────────────────────────
   recordPublishHistory(entry: {
+    tenantId?: number;
     ozonReviewId: string;
     ozonSku: string;
     productName: string;
@@ -363,13 +487,14 @@ class SqliteStorage implements IStorage {
     publishedAt: string;
   }): void {
     const { sqlite } = getSqlite();
-    // Skip if already recorded (idempotent)
-    const exists = sqlite.prepare("SELECT id FROM publish_history WHERE ozon_review_id = ?").get(entry.ozonReviewId);
+    // Skip if already recorded for this tenant (idempotent)
+    const exists = sqlite.prepare("SELECT id FROM publish_history WHERE ozon_review_id = ? AND tenant_id = ?").get(entry.ozonReviewId, entry.tenantId ?? 1);
     if (exists) return;
     sqlite.prepare(`
-      INSERT INTO publish_history (ozon_review_id, ozon_sku, product_name, author_name, rating, review_text, response_text, original_ai_text, auto_published, published_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO publish_history (tenant_id, ozon_review_id, ozon_sku, product_name, author_name, rating, review_text, response_text, original_ai_text, auto_published, published_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
+      entry.tenantId ?? 1,
       entry.ozonReviewId,
       entry.ozonSku,
       entry.productName,
@@ -383,18 +508,18 @@ class SqliteStorage implements IStorage {
     );
   }
 
-  getPublishHistory(from?: string, to?: string): any[] {
+  getPublishHistory(tenantId: number, from?: string, to?: string): any[] {
     const { sqlite } = getSqlite();
-    let query = "SELECT * FROM publish_history";
-    const params: string[] = [];
+    let query = "SELECT * FROM publish_history WHERE tenant_id = ?";
+    const params: any[] = [tenantId];
     if (from && to) {
-      query += " WHERE published_at >= ? AND published_at <= ?";
+      query += " AND published_at >= ? AND published_at <= ?";
       params.push(from, to);
     } else if (from) {
-      query += " WHERE published_at >= ?";
+      query += " AND published_at >= ?";
       params.push(from);
     } else if (to) {
-      query += " WHERE published_at <= ?";
+      query += " AND published_at <= ?";
       params.push(to);
     }
     query += " ORDER BY published_at DESC";
@@ -402,12 +527,16 @@ class SqliteStorage implements IStorage {
   }
 
   // ── Clear ──────────────────────────────────────────────────────────────────
-  async clearAllData(): Promise<void> {
-    const { db } = getSqlite();
-    db.delete(responsesTable).run();
-    db.delete(reviewsTable).run();
-    // publish_history is intentionally NOT cleared — it's the permanent archive
-    console.log("[clearAllData] DB cleared. published_ids.json and publish_history preserved.");
+  async clearAllData(tenantId?: number): Promise<void> {
+    const { sqlite } = getSqlite();
+    if (tenantId) {
+      sqlite.prepare("DELETE FROM responses WHERE tenant_id = ?").run(tenantId);
+      sqlite.prepare("DELETE FROM reviews WHERE tenant_id = ?").run(tenantId);
+    } else {
+      sqlite.prepare("DELETE FROM responses").run();
+      sqlite.prepare("DELETE FROM reviews").run();
+    }
+    console.log(`[clearAllData] DB cleared for tenant=${tenantId ?? "all"}.`);
   }
 
   // ── Questions ─────────────────────────────────────────────────────────────
@@ -423,50 +552,59 @@ class SqliteStorage implements IStorage {
   }
 
   private _rowToQ(row: any): Question {
-    return { ...row, isAnswered: Boolean(row.isAnswered), autoPublished: Boolean(row.autoPublished) };
+    return { ...row, isAnswered: Boolean(row.isAnswered || row.is_answered), autoPublished: Boolean(row.autoPublished || row.auto_published) };
   }
 
   private _rowToQR(row: any): QuestionResponse {
-    return { ...row, aiGenerated: Boolean(row.aiGenerated) };
+    return { ...row, aiGenerated: Boolean(row.aiGenerated || row.ai_generated) };
   }
 
-  async getQuestions(filters?: { status?: string; productId?: string }): Promise<QuestionWithResponse[]> {
-    const { db } = getSqlite();
-    const rows = db.select().from(questionsTable)
-      .orderBy(sql`${questionsTable.createdAt} DESC`).all();
-    const result = rows.map(r => this._rowToQ(r)).filter(q => {
+  async getQuestions(tenantId: number, filters?: { status?: string; productId?: string }): Promise<QuestionWithResponse[]> {
+    const { sqlite } = getSqlite();
+    const rows = sqlite.prepare("SELECT * FROM questions WHERE tenant_id = ? ORDER BY created_at DESC").all(tenantId);
+    const result = rows.map((r: any) => this._rowToQ(r)).filter((q: Question) => {
       if (filters?.status && q.status !== filters.status) return false;
       if (filters?.productId && q.productId !== filters.productId) return false;
       return true;
     });
-    return result.map(q => this._attachQuestionResponse(q));
+    return result.map((q: Question) => this._attachQuestionResponse(q));
   }
 
-  async getQuestionById(id: number): Promise<QuestionWithResponse | null> {
-    const { db } = getSqlite();
-    const row = db.select().from(questionsTable).where(eq(questionsTable.id, id)).get();
+  async getQuestionById(id: number, tenantId: number): Promise<QuestionWithResponse | null> {
+    const { sqlite } = getSqlite();
+    const row = sqlite.prepare("SELECT * FROM questions WHERE id = ? AND tenant_id = ?").get(id, tenantId);
     if (!row) return null;
     return this._attachQuestionResponse(this._rowToQ(row));
   }
 
-  async getQuestionByOzonId(ozonQuestionId: string): Promise<QuestionWithResponse | null> {
-    const { db } = getSqlite();
-    const row = db.select().from(questionsTable)
-      .where(eq(questionsTable.ozonQuestionId, ozonQuestionId)).get();
+  async getQuestionByOzonId(ozonQuestionId: string, tenantId: number): Promise<QuestionWithResponse | null> {
+    const { sqlite } = getSqlite();
+    const row = sqlite.prepare("SELECT * FROM questions WHERE ozon_question_id = ? AND tenant_id = ?").get(ozonQuestionId, tenantId);
     if (!row) return null;
     return this._attachQuestionResponse(this._rowToQ(row));
   }
 
   async createQuestion(data: InsertQuestion): Promise<Question> {
-    const { db } = getSqlite();
+    const { sqlite } = getSqlite();
     const ts = now();
-    const row = db.insert(questionsTable).values({
-      ...data,
-      isAnswered: data.isAnswered ? 1 : 0,
-      autoPublished: (data as any).autoPublished ? 1 : 0,
-      createdAt: ts,
-      updatedAt: ts,
-    } as any).returning().get();
+    const result = sqlite.prepare(`
+      INSERT INTO questions (tenant_id, ozon_question_id, product_id, product_name, ozon_sku, author_name, question_text, question_date, status, is_answered, auto_published, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      (data as any).tenantId ?? 1,
+      data.ozonQuestionId,
+      data.productId ?? "",
+      data.productName ?? "",
+      data.ozonSku ?? "",
+      data.authorName ?? "",
+      data.questionText ?? "",
+      data.questionDate ?? "",
+      data.status ?? "new",
+      data.isAnswered ? 1 : 0,
+      (data as any).autoPublished ? 1 : 0,
+      ts, ts
+    );
+    const row = sqlite.prepare("SELECT * FROM questions WHERE id = ?").get(result.lastInsertRowid);
     return this._rowToQ(row);
   }
 
@@ -489,16 +627,22 @@ class SqliteStorage implements IStorage {
   }
 
   async createQuestionResponse(data: InsertQuestionResponse): Promise<QuestionResponse> {
-    const { db } = getSqlite();
+    const { sqlite } = getSqlite();
     const ts = now();
-    const row = db.insert(questionResponsesTable).values({
-      ...data,
-      originalAiText: (data as any).originalAiText ?? data.responseText ?? "",
-      approvedAt: data.approvedAt instanceof Date ? data.approvedAt.toISOString() : (data.approvedAt ?? null),
-      publishedAt: data.publishedAt instanceof Date ? data.publishedAt.toISOString() : (data.publishedAt ?? null),
-      createdAt: ts,
-      updatedAt: ts,
-    }).returning().get();
+    const result = sqlite.prepare(`
+      INSERT INTO question_responses (tenant_id, question_id, response_text, original_ai_text, ai_generated, approved_at, published_at, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      (data as any).tenantId ?? 1,
+      data.questionId,
+      data.responseText ?? "",
+      (data as any).originalAiText ?? data.responseText ?? "",
+      data.aiGenerated ? 1 : 0,
+      data.approvedAt instanceof Date ? data.approvedAt.toISOString() : (data.approvedAt ?? null),
+      data.publishedAt instanceof Date ? data.publishedAt.toISOString() : (data.publishedAt ?? null),
+      ts, ts
+    );
+    const row = sqlite.prepare("SELECT * FROM question_responses WHERE id = ?").get(result.lastInsertRowid);
     return this._rowToQR(row);
   }
 
@@ -514,16 +658,16 @@ class SqliteStorage implements IStorage {
     return this._rowToQR(row);
   }
 
-  async getQuestionStats(): Promise<{ total: number; new: number; pendingApproval: number; approved: number; published: number; rejected: number }> {
-    const { db } = getSqlite();
-    const all = db.select().from(questionsTable).all();
+  async getQuestionStats(tenantId: number): Promise<{ total: number; new: number; pendingApproval: number; approved: number; published: number; rejected: number }> {
+    const { sqlite } = getSqlite();
+    const all = sqlite.prepare("SELECT * FROM questions WHERE tenant_id = ?").all(tenantId);
     return {
       total: all.length,
-      new: all.filter(q => q.status === "new").length,
-      pendingApproval: all.filter(q => q.status === "pending_approval").length,
-      approved: all.filter(q => q.status === "approved").length,
-      published: all.filter(q => q.status === "published").length,
-      rejected: all.filter(q => q.status === "rejected").length,
+      new: all.filter((q: any) => q.status === "new").length,
+      pendingApproval: all.filter((q: any) => q.status === "pending_approval").length,
+      approved: all.filter((q: any) => q.status === "approved").length,
+      published: all.filter((q: any) => q.status === "published").length,
+      rejected: all.filter((q: any) => q.status === "rejected").length,
     };
   }
 
@@ -532,7 +676,7 @@ class SqliteStorage implements IStorage {
 export const storage = new SqliteStorage();
 
 // ── Auto-select storage backend ───────────────────────────────────────────────
-// If DATABASE_URL is set → use PostgreSQL (Timeweb App Platform)
+// If PG_CONNECTION_STRING is set → use PostgreSQL (Timeweb App Platform)
 // Otherwise → use SQLite (local / dev)
 export let activeStorage: any = storage; // SQLite by default
 
@@ -564,14 +708,10 @@ export async function initStorage(): Promise<void> {
     }
     // Backfill published IDs from existing DB on startup
     try {
-      const { db } = getSqlite();
       const pub = loadPublishedIds();
-      const rows = db.select({
-        ozonReviewId: reviewsTable.ozonReviewId,
-        status: reviewsTable.status,
-      }).from(reviewsTable).all();
+      const rows = sqlite.prepare("SELECT ozon_review_id, status FROM reviews WHERE status = 'published'").all();
       const before = pub.size;
-      rows.filter((r: any) => r.status === "published").forEach((r: any) => pub.add(r.ozonReviewId));
+      rows.forEach((r: any) => pub.add(r.ozon_review_id));
       if (pub.size > before) {
         writeFileSync(PUBLISHED_IDS_FILE, JSON.stringify([...pub], null, 2), "utf-8");
         console.log(`[backfill] Added ${pub.size - before} published IDs (total: ${pub.size})`);
